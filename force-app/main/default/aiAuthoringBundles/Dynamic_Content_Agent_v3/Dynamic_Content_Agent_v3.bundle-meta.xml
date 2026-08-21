@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<AiAuthoringBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+    <bundleType>AGENT</bundleType>
+    <target></target>
+    <versionDescription>Adds Validate Content Plan, called before showing any plan for approval -- catches missing textByDecision entries etc. deterministically instead of only failing at build time.</versionDescription>
+    <versionTag>v6-validate-plan-before-approval</versionTag>
+</AiAuthoringBundle>
