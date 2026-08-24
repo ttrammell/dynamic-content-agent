@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
-    <description>Per-org configuration for the AuraPoc email builder&apos;s headless JWT auth and default branding assets -- keeps org-specific values out of Apex so this package can be installed into a new org by adding one record instead of editing code.</description>
-    <label>AuraPoc Config</label>
-    <pluralLabel>AuraPoc Configs</pluralLabel>
-    <visibility>Public</visibility>
-</CustomObject>
