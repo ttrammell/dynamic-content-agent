@@ -47,6 +47,16 @@ public with sharing class BuildDynamicEmailAction {
         @InvocableVariable(label='Header Content Key Override')
         public String headerContentKeyOverride;
 
+        // Explicitly omit the logo/header from the banner -- distinct from simply omitting the
+        // override above, which falls back to the org's AuraPoc_Config__mdt default. Set true
+        // when the caller searched for a brand/default asset and genuinely found none, so
+        // nothing renders rather than silently substituting an unrelated org-default image.
+        @InvocableVariable(label='Suppress Logo')
+        public Boolean suppressLogo;
+
+        @InvocableVariable(label='Suppress Header')
+        public Boolean suppressHeader;
+
         // contentKey of a sfdc_cms__brand ManagedContent record (from FindBrandRecordAction)
         // -- attaches that brand's colorScheme/typography/button styling via
         // lightning:brandSource. Distinct from logo/header, which only swap pictures;
@@ -55,36 +65,28 @@ public with sharing class BuildDynamicEmailAction {
         @InvocableVariable(label='Brand Content Key Override')
         public String brandContentKeyOverride;
 
-        // --- Optional personalization. Omit decisionsJson/targetsJson to build a plain,
-        // unpersonalized email in one call. Provide both to build AND wire in one shot. ---
+        // --- Optional personalization. Omit personalizationsJson to build a plain,
+        // unpersonalized email in one call. Provide it to build AND wire in one shot. ---
 
-        @InvocableVariable(label='Personalization Point Name')
-        public String ppName;
-
-        @InvocableVariable(label='Personalization Point Label')
-        public String ppLabel;
-
-        // JSON array of decisions. Field lives on the root profile object by default:
-        // [{"name":"Has_First_Name_v1","label":"Has First Name","criteriaFieldApiName":"ssot__FirstName__c"}]
-        // Optional criteriaType ("has_value" default | "equals" | "in") + value/values:
-        // [{"name":"Is_West_v1","label":"US West","criteriaFieldApiName":"ssot__StateProvinceId__c",
-        //   "criteriaObjectApiName":"ssot__ContactPointAddress__dlm","criteriaPath":"CONTACT_POINT_ADDRESS_PATH",
-        //   "criteriaType":"in","values":["CA","WA","OR"]}]
-        // criteriaObjectApiName defaults to UnifiedIndividual__dlm (the root). For any other
-        // object, criteriaPath is required -- one of: ACCOUNT_PATH, CONTACT_POINT_ADDRESS_PATH,
-        // INDIVIDUAL_PATH, EMAIL_ENGAGEMENT_PATH, LEAD_PATH. State/Province values must be
-        // 2-letter codes (e.g. "CA"), never full names.
-        @InvocableVariable(label='Decisions JSON')
-        public String decisionsJson;
-
-        // JSON array of targets, referencing an elementsJson "key" (NOT a raw block id) --
-        // this action resolves the key to the real block id itself, e.g.:
-        // [{"elementKey":"greeting_heading","blockDefinition":"lightning/heading","textByDecision":{"Has_First_Name_v1":"Hi there!"}}]
-        // If the target's blockDefinition is "lightning/image" (an image/banner swap), each
-        // textByDecision value must instead be an object, not plain text:
-        // {"Has_First_Name_v1":{"contentKey":"MC...","altText":"...","widthPercent":100}}
-        @InvocableVariable(label='Targets JSON')
-        public String targetsJson;
+        // JSON array of PersonalizationPoint specs, ONE PER INDEPENDENT AXIS -- Salesforce
+        // evaluates decisions within one PersonalizationPoint as mutually-exclusive alternatives,
+        // not independently-combinable facts, so unrelated axes (e.g. industry AND has-first-name)
+        // must NOT share a PP. Each entry:
+        // {"ppName":"Industry_Personalization","ppLabel":"Industry Personalization",
+        //  "decisionsJson":"[{\"name\":\"Has_First_Name_v1\",\"label\":\"Has First Name\",
+        //    \"criteriaFieldApiName\":\"ssot__FirstName__c\"}]",
+        //  "targetsJson":"[{\"elementKey\":\"greeting_heading\",\"blockDefinition\":\"lightning/heading\",
+        //    \"textByDecision\":{\"Has_First_Name_v1\":\"Hi there!\"}}]"}
+        // decisionsJson supports optional criteriaType ("has_value" default | "equals" | "in") +
+        // value/values, and criteriaObjectApiName/criteriaPath for related-object fields (one of
+        // ACCOUNT_PATH, CONTACT_POINT_ADDRESS_PATH, INDIVIDUAL_PATH, EMAIL_ENGAGEMENT_PATH,
+        // LEAD_PATH). State/Province values must be 2-letter codes. targetsJson entries reference
+        // an elementsJson "key" (NOT a raw block id); if blockDefinition is "lightning/image", each
+        // textByDecision value must be an object {"contentKey":"...","altText":"...","widthPercent":N},
+        // not plain text. At most 3 entries (PersonalizationPoints) per email, at most 10 decisions
+        // per entry -- matches the marketing toolkit's own silent install caps.
+        @InvocableVariable(label='Personalizations JSON')
+        public String personalizationsJson;
 
         @InvocableVariable(label='Data Space Name')
         public String dataSpaceName;
@@ -109,6 +111,8 @@ public with sharing class BuildDynamicEmailAction {
         @InvocableVariable(label='Personalized')
         public Boolean personalized;
 
+        // JSON array of the PersonalizationPoint names actually created (one per independent
+        // axis), e.g. ["Industry_Personalization_a1b2c3","Has_First_Name_Personalization_d4e5f6"].
         @InvocableVariable(label='Personalization Point Name')
         public String ppName;
 
@@ -124,6 +128,11 @@ public with sharing class BuildDynamicEmailAction {
 
     public class ElementException extends Exception {}
     public class WireException extends Exception {}
+
+    // Matches the marketing toolkit's own silent install caps (project_dc_topology_caps) --
+    // a PP binds to one sourceRecordId, so multi-axis personalization needs multiple PPs.
+    public static final Integer MAX_PPS_PER_EMAIL = 3;
+    public static final Integer MAX_DECISIONS_PER_PP = 10;
 
     @TestVisible
     static AuraPocTokenSource tokenSource = new AuraPocTokenProvider();
@@ -677,6 +686,21 @@ public with sharing class BuildDynamicEmailAction {
                 if (req.preheader != null && req.preheader.contains('{{')) {
                     throw new ElementException('Merge field placeholders are not supported in the preheader -- it renders outside the data-graph context.');
                 }
+                // Confirmed live: passing a logo/header IMAGE asset's contentKey as
+                // brandContentKeyOverride produces a CMS-side 400 ("Invalid ManagedContent
+                // Reference content type [sfdc_cms__brand:sfdc_cms__image]") -- lightning:
+                // brandSource requires an actual sfdc_cms__brand record's contentKey (from Find
+                // Brand Record), never a logo/header image's (from Find Brand Assets). The two
+                // never legitimately share a contentKey, so this catches the mistake
+                // deterministically before the callout instead of surfacing a confusing HTTP 400.
+                if (String.isNotBlank(req.brandContentKeyOverride)
+                        && (req.brandContentKeyOverride == req.logoContentKeyOverride
+                            || req.brandContentKeyOverride == req.headerContentKeyOverride)) {
+                    throw new ElementException('brandContentKeyOverride "' + req.brandContentKeyOverride
+                        + '" matches a logo/header image contentKey -- it must be a CMS brand RECORD\'s contentKey '
+                        + '(from Find Brand Record), never a logo/header image\'s (from Find Brand Assets). '
+                        + 'Omit brandContentKeyOverride entirely if no brand record was found for this brand.');
+                }
 
                 List<Object> elements = (List<Object>) JSON.deserializeUntyped(req.elementsJson);
                 Map<String, Object> blockIds = new Map<String, Object>();
@@ -732,9 +756,12 @@ public with sharing class BuildDynamicEmailAction {
                 Boolean branding = req.includeBranding == null ? true : req.includeBranding;
 
                 if (branding) {
+                    Boolean skipLogo = req.suppressLogo == true;
+                    Boolean skipHeader = req.suppressHeader == true;
                     String logoKey = String.isNotBlank(req.logoContentKeyOverride) ? req.logoContentKeyOverride : config().LogoContentKey__c;
                     String headerKey = String.isNotBlank(req.headerContentKeyOverride) ? req.headerContentKeyOverride : config().HeaderContentKey__c;
 
+                    if (!skipLogo) {
                     Map<String, Object> logoColumn = new Map<String, Object>{
                         'id' => newBlockId(), 'definition' => 'lightning/column', 'type' => 'block',
                         'attributes' => columnAttrs(12.0),
@@ -744,7 +771,9 @@ public with sharing class BuildDynamicEmailAction {
                         'id' => newBlockId(), 'definition' => 'lightning/section', 'type' => 'block',
                         'attributes' => sectionAttrs(), 'children' => new List<Object>{ logoColumn }
                     });
+                    }
 
+                    if (!skipHeader) {
                     Map<String, Object> headerColumn = new Map<String, Object>{
                         'id' => newBlockId(), 'definition' => 'lightning/column', 'type' => 'block',
                         'attributes' => columnAttrs(12.0),
@@ -754,6 +783,7 @@ public with sharing class BuildDynamicEmailAction {
                         'id' => newBlockId(), 'definition' => 'lightning/section', 'type' => 'block',
                         'attributes' => sectionAttrs(), 'children' => new List<Object>{ headerColumn }
                     });
+                    }
                 }
 
                 topLevelSections.addAll(bodySections);
@@ -870,15 +900,25 @@ public with sharing class BuildDynamicEmailAction {
                 Map<String, Object> fetchedContentBody = (Map<String, Object>) content.get('contentBody');
                 managedContentVariantId = String.valueOf(content.get('managedContentVariantId'));
 
-                Boolean wantsPersonalization = String.isNotBlank(req.decisionsJson) && String.isNotBlank(req.targetsJson);
+                Boolean wantsPersonalization = String.isNotBlank(req.personalizationsJson);
                 if (!wantsPersonalization) {
                     results.add(res);
                     continue;
                 }
 
+                List<Object> ppSpecs = (List<Object>) JSON.deserializeUntyped(req.personalizationsJson);
+                if (ppSpecs.isEmpty()) {
+                    results.add(res);
+                    continue;
+                }
+                if (ppSpecs.size() > MAX_PPS_PER_EMAIL) {
+                    throw new WireException('personalizationsJson has ' + ppSpecs.size() + ' entries, but at most '
+                        + MAX_PPS_PER_EMAIL + ' PersonalizationPoints are supported per email.');
+                }
+
                 // --- Step 2: personalize, in the same call. Any failure here rolls back Step 1. ---
                 try {
-                    wirePersonalization(req, accessToken, managedContentId, fetchedContentBody, managedContentVariantId, blockIds, dataSpace, graphName, res);
+                    wirePersonalizations(ppSpecs, accessToken, managedContentId, fetchedContentBody, managedContentVariantId, blockIds, dataSpace, graphName, res);
                 } catch (Exception wireEx) {
                     Boolean rolledBack = deleteContent(managedContentVariantId, accessToken);
                     res.success = false;
@@ -922,7 +962,12 @@ public with sharing class BuildDynamicEmailAction {
         return new Map<String, Object>{ 'text' => sanitizeText(text) };
     }
 
-    private static void wirePersonalization(Request req, String accessToken, String managedContentId, Map<String, Object> contentBody,
+    // One PersonalizationPoint per ppSpecs entry (one per independent axis) -- all combined into
+    // a SINGLE final PUT, matching the marketing toolkit's own confirmed multi-PP shape
+    // (docs/dynamic-content.md SS5.3): each PP gets its own sfdc_cms:operations entry (own
+    // targetId, own personalizationPoint.name), but every PP's variants share ONE
+    // sfdc_cms:variants array. The Aura session is minted once and reused across all PP creations.
+    private static void wirePersonalizations(List<Object> ppSpecs, String accessToken, String managedContentId, Map<String, Object> contentBody,
             String variantRecordId, Map<String, Object> blockIds, String dataSpace, String graphName, Result res) {
 
         // Seed from whatever the main body already found (keyed by sfdcExpressionKey) so a
@@ -937,137 +982,148 @@ public with sharing class BuildDynamicEmailAction {
             }
         }
 
-        List<Object> decisionSpecs = (List<Object>) JSON.deserializeUntyped(req.decisionsJson);
-        List<Object> targetSpecs = (List<Object>) JSON.deserializeUntyped(req.targetsJson);
-        if (decisionSpecs.isEmpty()) {
-            throw new WireException('decisionsJson must contain at least one decision.');
-        }
-        if (targetSpecs.isEmpty()) {
-            throw new WireException('targetsJson must contain at least one target.');
-        }
-
         AuraSessionMinter.Session sess = AuraSessionMinter.mint(accessToken, AuraPocTokenProvider.instanceUrl());
-        String safePpName = uniquePpName(req.ppName);
-
-        List<Object> ppDecisions = new List<Object>();
-        Map<String, String> safeDecisionNameByRaw = new Map<String, String>();
-        for (Object specObj : decisionSpecs) {
-            Map<String, Object> spec = (Map<String, Object>) specObj;
-            String rawName = String.valueOf(spec.get('name'));
-            String safeName = sanitizeDeveloperName(rawName);
-            safeDecisionNameByRaw.put(rawName, safeName);
-
-            Map<String, Object> criteria = buildDecisionCriteria(spec);
-            ppDecisions.add(new Map<String, Object>{
-                'label' => spec.get('label'),
-                'name' => safeName,
-                'description' => spec.get('label'),
-                'personalizerName' => null,
-                'attributeValues' => new List<Object>{
-                    new Map<String, Object>{ 'attributeEnum' => 'Variation', 'value' => safeName, 'attributeName' => null }
-                },
-                'criteria' => JSON.serialize(criteria)
-            });
-        }
-
-        Map<String, Object> ppInput = new Map<String, Object>{
-            'label' => req.ppLabel,
-            'name' => safePpName,
-            'dataSpaceName' => dataSpace,
-            'profileDataGraphName' => graphName,
-            'schemaEnum' => 'ExperienceVariation',
-            'source' => 'BlockBuilder',
-            'sourceRecordId' => managedContentId,
-            'isAuthenticationRequired' => false,
-            'decisions' => ppDecisions
-        };
-
         String auraContextJson = JSON.serialize(new Map<String, Object>{
             'mode' => 'PROD', 'fwuid' => sess.fwuid, 'app' => sess.appName, 'loaded' => sess.loaded,
             'dn' => new List<Object>(), 'globals' => new Map<String, Object>(), 'uad' => true
         });
 
-        AuraServiceClient.CallResult ppResult = AuraServiceClient.callAction(
-            sess,
-            'aura://PersonalizationServiceController/ACTION$createPersonalizationPoint',
-            'aura.PersonalizationService.createPersonalizationPoint',
-            auraContextJson, '/cmsAuthor/contentEditor.app', 1,
-            new Map<String, Object>{ 'input' => ppInput }
-        );
+        List<Object> allOperations = new List<Object>();
+        List<Object> allVariants = new List<Object>();
+        List<Object> allVariantIdEntries = new List<Object>();
+        List<String> createdPpNames = new List<String>();
 
-        if (ppResult.state != AuraServiceClient.CallState.SUCCESS) {
-            throw new WireException('PersonalizationPoint creation failed: ' + ppResult.state
-                + (ppResult.rawError != null ? ' :: ' + String.valueOf(ppResult.rawError) : ''));
-        }
+        for (Object ppSpecObj : ppSpecs) {
+            Map<String, Object> ppSpec = (Map<String, Object>) ppSpecObj;
+            String rawPpName = String.valueOf(ppSpec.get('ppName'));
+            String ppLabel = String.valueOf(ppSpec.get('ppLabel'));
+            List<Object> decisionSpecs = (List<Object>) JSON.deserializeUntyped(String.valueOf(ppSpec.get('decisionsJson')));
+            List<Object> targetSpecs = (List<Object>) JSON.deserializeUntyped(String.valueOf(ppSpec.get('targetsJson')));
 
-        contentBody.put('lightning:dataProviders', new List<Object>{ dataGraphDataProvider(graphName, dataSpace) });
-
-        List<Object> operations = new List<Object>();
-        List<Object> variants = new List<Object>();
-        List<Object> variantIdEntries = new List<Object>();
-
-        for (Object targetObj : targetSpecs) {
-            Map<String, Object> target = (Map<String, Object>) targetObj;
-            String elementKey = String.valueOf(target.get('elementKey'));
-            if (!blockIds.containsKey(elementKey)) {
-                throw new WireException('targetsJson references unknown element key "' + elementKey
-                    + '" -- must match a "key" from elementsJson.');
+            if (decisionSpecs.isEmpty()) {
+                throw new WireException('PersonalizationPoint "' + ppLabel + '": decisionsJson must contain at least one decision.');
             }
-            String targetBlockId = String.valueOf(blockIds.get(elementKey));
-            String blockDefinition = target.get('blockDefinition') != null
-                ? String.valueOf(target.get('blockDefinition')) : 'lightning/paragraph';
-            Map<String, Object> textByDecision = (Map<String, Object>) target.get('textByDecision');
+            if (targetSpecs.isEmpty()) {
+                throw new WireException('PersonalizationPoint "' + ppLabel + '": targetsJson must contain at least one target.');
+            }
+            if (decisionSpecs.size() > MAX_DECISIONS_PER_PP) {
+                throw new WireException('PersonalizationPoint "' + ppLabel + '" has ' + decisionSpecs.size()
+                    + ' decisions, but at most ' + MAX_DECISIONS_PER_PP + ' are supported per personalization point.');
+            }
 
-            List<Object> decisionToVariantList = new List<Object>();
+            String safePpName = uniquePpName(rawPpName);
+
+            List<Object> ppDecisions = new List<Object>();
+            Map<String, String> safeDecisionNameByRaw = new Map<String, String>();
             for (Object specObj : decisionSpecs) {
                 Map<String, Object> spec = (Map<String, Object>) specObj;
-                // textByDecision keys match targetsJson's own literal decision names, authored
-                // in the same LLM turn as decisionsJson -- look up by the RAW name. Everything
-                // sent to the PP/variant API must use the SAME sanitized name actually
-                // registered on the PersonalizationPoint above, not the raw one.
-                String rawDecisionName = String.valueOf(spec.get('name'));
-                String safeDecisionName = safeDecisionNameByRaw.get(rawDecisionName);
-                if (!textByDecision.containsKey(rawDecisionName)) {
-                    throw new WireException('Target "' + elementKey
-                        + '" is missing textByDecision entry for decision ' + rawDecisionName);
-                }
+                String rawName = String.valueOf(spec.get('name'));
+                String safeName = sanitizeDeveloperName(rawName);
+                safeDecisionNameByRaw.put(rawName, safeName);
 
-                String variantUuid = newUuid();
-                decisionToVariantList.add(new Map<String, Object>{ 'decisionName' => safeDecisionName, 'variantId' => variantUuid });
-                variantIdEntries.add(new Map<String, Object>{
-                    'elementKey' => elementKey, 'decisionName' => safeDecisionName, 'variantId' => variantUuid
+                Map<String, Object> criteria = buildDecisionCriteria(spec);
+                ppDecisions.add(new Map<String, Object>{
+                    'label' => spec.get('label'),
+                    'name' => safeName,
+                    'description' => spec.get('label'),
+                    'personalizerName' => null,
+                    'attributeValues' => new List<Object>{
+                        new Map<String, Object>{ 'attributeEnum' => 'Variation', 'value' => safeName, 'attributeName' => null }
+                    },
+                    'criteria' => JSON.serialize(criteria)
                 });
-                variants.add(new Map<String, Object>{
-                    'id' => variantUuid,
-                    'name' => spec.get('label'),
-                    'type' => 'personalization',
-                    'body' => new Map<String, Object>{
-                        'sfdc_cms:block' => new Map<String, Object>{
-                            'children' => new List<Object>{
-                                new Map<String, Object>{
-                                    'attributes' => variantAttributesFor(blockDefinition, textByDecision.get(rawDecisionName), expressionsByKey),
-                                    'id' => targetBlockId,
-                                    'definition' => blockDefinition,
-                                    'type' => 'block'
+            }
+
+            Map<String, Object> ppInput = new Map<String, Object>{
+                'label' => ppLabel,
+                'name' => safePpName,
+                'dataSpaceName' => dataSpace,
+                'profileDataGraphName' => graphName,
+                'schemaEnum' => 'ExperienceVariation',
+                'source' => 'BlockBuilder',
+                'sourceRecordId' => managedContentId,
+                'isAuthenticationRequired' => false,
+                'decisions' => ppDecisions
+            };
+
+            AuraServiceClient.CallResult ppResult = AuraServiceClient.callAction(
+                sess,
+                'aura://PersonalizationServiceController/ACTION$createPersonalizationPoint',
+                'aura.PersonalizationService.createPersonalizationPoint',
+                auraContextJson, '/cmsAuthor/contentEditor.app', 1,
+                new Map<String, Object>{ 'input' => ppInput }
+            );
+
+            if (ppResult.state != AuraServiceClient.CallState.SUCCESS) {
+                throw new WireException('PersonalizationPoint "' + ppLabel + '" creation failed: ' + ppResult.state
+                    + (ppResult.rawError != null ? ' :: ' + String.valueOf(ppResult.rawError) : ''));
+            }
+            createdPpNames.add(safePpName);
+
+            for (Object targetObj : targetSpecs) {
+                Map<String, Object> target = (Map<String, Object>) targetObj;
+                String elementKey = String.valueOf(target.get('elementKey'));
+                if (!blockIds.containsKey(elementKey)) {
+                    throw new WireException('targetsJson references unknown element key "' + elementKey
+                        + '" -- must match a "key" from elementsJson.');
+                }
+                String targetBlockId = String.valueOf(blockIds.get(elementKey));
+                String blockDefinition = target.get('blockDefinition') != null
+                    ? String.valueOf(target.get('blockDefinition')) : 'lightning/paragraph';
+                Map<String, Object> textByDecision = (Map<String, Object>) target.get('textByDecision');
+
+                List<Object> decisionToVariantList = new List<Object>();
+                for (Object specObj : decisionSpecs) {
+                    Map<String, Object> spec = (Map<String, Object>) specObj;
+                    // textByDecision keys match targetsJson's own literal decision names, authored
+                    // in the same LLM turn as decisionsJson -- look up by the RAW name. Everything
+                    // sent to the PP/variant API must use the SAME sanitized name actually
+                    // registered on the PersonalizationPoint above, not the raw one.
+                    String rawDecisionName = String.valueOf(spec.get('name'));
+                    String safeDecisionName = safeDecisionNameByRaw.get(rawDecisionName);
+                    if (!textByDecision.containsKey(rawDecisionName)) {
+                        throw new WireException('PersonalizationPoint "' + ppLabel + '" target "' + elementKey
+                            + '" is missing textByDecision entry for decision ' + rawDecisionName);
+                    }
+
+                    String variantUuid = newUuid();
+                    decisionToVariantList.add(new Map<String, Object>{ 'decisionName' => safeDecisionName, 'variantId' => variantUuid });
+                    allVariantIdEntries.add(new Map<String, Object>{
+                        'ppName' => safePpName, 'elementKey' => elementKey, 'decisionName' => safeDecisionName, 'variantId' => variantUuid
+                    });
+                    allVariants.add(new Map<String, Object>{
+                        'id' => variantUuid,
+                        'name' => spec.get('label'),
+                        'type' => 'personalization',
+                        'body' => new Map<String, Object>{
+                            'sfdc_cms:block' => new Map<String, Object>{
+                                'children' => new List<Object>{
+                                    new Map<String, Object>{
+                                        'attributes' => variantAttributesFor(blockDefinition, textByDecision.get(rawDecisionName), expressionsByKey),
+                                        'id' => targetBlockId,
+                                        'definition' => blockDefinition,
+                                        'type' => 'block'
+                                    }
                                 }
                             }
                         }
-                    }
+                    });
+                }
+
+                allOperations.add(new Map<String, Object>{
+                    'attributes' => new Map<String, Object>{
+                        'decisionToVariantList' => decisionToVariantList,
+                        'personalizationPoint' => new Map<String, Object>{ 'dataspace' => dataSpace, 'name' => safePpName }
+                    },
+                    'definition' => 'sfdc_cms__pspVariantOperation',
+                    'targetId' => targetBlockId
                 });
             }
-
-            operations.add(new Map<String, Object>{
-                'attributes' => new Map<String, Object>{
-                    'decisionToVariantList' => decisionToVariantList,
-                    'personalizationPoint' => new Map<String, Object>{ 'dataspace' => dataSpace, 'name' => safePpName }
-                },
-                'definition' => 'sfdc_cms__pspVariantOperation',
-                'targetId' => targetBlockId
-            });
         }
 
-        contentBody.put('sfdc_cms:operations', operations);
-        contentBody.put('sfdc_cms:variants', variants);
+        contentBody.put('lightning:dataProviders', new List<Object>{ dataGraphDataProvider(graphName, dataSpace) });
+        contentBody.put('sfdc_cms:operations', allOperations);
+        contentBody.put('sfdc_cms:variants', allVariants);
         contentBody.put('lightning:expressions', new List<Object>(expressionsByKey.values()));
 
         HttpRequest putReq = new HttpRequest();
@@ -1084,8 +1140,8 @@ public with sharing class BuildDynamicEmailAction {
         }
 
         res.personalized = true;
-        res.ppName = safePpName;
-        res.variantIdsJson = JSON.serialize(variantIdEntries);
+        res.ppName = JSON.serialize(createdPpNames);
+        res.variantIdsJson = JSON.serialize(allVariantIdEntries);
     }
 
     // CMS content has no REST delete -- confirmed live (405 Method Not Allowed). The only

@@ -2,6 +2,6 @@
 <AiAuthoringBundle xmlns="http://soap.sforce.com/2006/04/metadata">
     <bundleType>AGENT</bundleType>
     <target></target>
-    <versionDescription>Adds Validate Content Plan, called before showing any plan for approval -- catches missing textByDecision entries etc. deterministically instead of only failing at build time.</versionDescription>
-    <versionTag>v6-validate-plan-before-approval</versionTag>
+    <versionDescription>Confirmed live: agent kept re-calling get_data_graph_details_tool blank instead of asking the user which graph, looping forever. Now stops after one ambiguous result, asks, waits, retries once with the answer.</versionDescription>
+    <versionTag>v26-stop-datagraph-retry-loop</versionTag>
 </AiAuthoringBundle>

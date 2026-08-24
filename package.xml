@@ -5,25 +5,21 @@
         <name>AiAuthoringBundle</name>
     </types>
     <types>
-        <members>AuraPoc_PlanEmailStructure</members>
+        <members>AuraPoc_PlanEmailStructureV2</members>
         <members>AuraPoc_WriteEmailCopy</members>
         <name>GenAiPromptTemplate</name>
     </types>
     <types>
+        <members>AssembleContentPlanAction</members>
+        <members>BuildDynamicEmailAction</members>
+        <members>DataGraphDetailsAction</members>
         <members>FindBrandAssetsAction</members>
         <members>FindBrandRecordAction</members>
-        <members>DataGraphDetailsAction</members>
-        <members>PlanEmailStructureAction</members>
-        <members>WriteEmailCopyAction</members>
-        <members>AssembleContentPlanAction</members>
         <members>ValidateContentPlanAction</members>
-        <members>BuildDynamicEmailAction</members>
         <members>AuraPocTokenProvider</members>
         <members>AuraPocTokenSource</members>
         <members>AuraServiceClient</members>
         <members>AuraSessionMinter</members>
-        <members>LlmCompletionProvider</members>
-        <members>NativePromptTemplateProvider</members>
         <name>ApexClass</name>
     </types>
     <types>

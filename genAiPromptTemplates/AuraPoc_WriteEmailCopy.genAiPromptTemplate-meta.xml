@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <GenAiPromptTemplate xmlns="http://soap.sforce.com/2006/04/metadata">
-    <activeVersionIdentifier>JwgBFPm6fydyS7dWeQidExYODRMOIfZT+SmdI4qJZUY=_1</activeVersionIdentifier>
+    <activeVersionIdentifier>JwgBFPm6fydyS7dWeQidExYODRMOIfZT+SmdI4qJZUY=_3</activeVersionIdentifier>
     <developerName>AuraPoc_WriteEmailCopy</developerName>
     <masterLabel>AuraPoc: Write Email Copy</masterLabel>
     <overridable>false</overridable>
@@ -9,7 +9,9 @@
 
 Original request (for tone/context only -- the structure below is already final, don&apos;t redesign it): {!$Input:UserIntent}
 
-Brand context (for tone/context only): {!$Input:BrandContext}
+Brand context (asset name-to-contentKey pairs, for awareness only -- not voice): {!$Input:BrandContext}
+
+Brand voice (description/identity/tone of the brand this email is for -- write in a way that matches this; if it says &quot;None available&quot;, default to a neutral, professional tone instead): {!$Input:BrandVoice}
 
 Structure to write copy for (slots and personalizations are already decided -- write copy for exactly these, nothing more, nothing fewer):
 {!$Input:StructurePlan}
@@ -38,7 +40,8 @@ Hard rules:
 1. Write copy for every slot key in the structure&apos;s &quot;slots&quot; list -- no more, no fewer.
 2. Every personalization&apos;s &quot;appliesToSlots&quot; slots must get a &quot;byPersonalization&quot; entry for that personalization&apos;s &quot;name&quot; -- no exceptions, no partial coverage. Self-check this before outputting: list every personalization name, then confirm it has a byPersonalization entry under every slot key listed in its appliesToSlots.
 3. Never reuse the angle-bracket instructional text from the shape above as if it were real content. Every word you output must be original copy written for this specific request and brand.
-4. Never fabricate a real-looking URL, contentKey, or fact not present in the request or brand context above.</content>
+4. Never fabricate a real-looking URL, contentKey, or fact not present in the request or brand context above.
+5. CRITICAL -- when brand voice above is not &quot;None available&quot;: treat it as a character brief, not a mood suggestion. Actually change your vocabulary, sentence length, and rhythm to match it -- don&apos;t just append enthusiasm to otherwise-generic copy. If the voice is playful/casual, write short, punchy, informal sentences. If it&apos;s confident/technical, use precise, assertive language, not hedging. Whatever the voice is, DO NOT default to safe generic-marketing filler -- ban yourself from words like &quot;excited&quot;, &quot;thrilled&quot;, &quot;innovative&quot;, &quot;cutting-edge&quot;, &quot;revolutionize&quot;, &quot;seamless&quot;, &quot;unlock&quot;, &quot;empower&quot;, &quot;leverage&quot; unless the brand voice itself specifically calls for that register. A reader who saw only the copy, with no brand name attached, should be able to guess the brand&apos;s personality from the words alone. Never mention or quote the brand voice text itself.</content>
         <inputs>
             <apiName>UserIntent</apiName>
             <definition>primitive://String</definition>
@@ -57,10 +60,16 @@ Hard rules:
             <referenceName>Input:StructurePlan</referenceName>
             <required>true</required>
         </inputs>
+        <inputs>
+            <apiName>BrandVoice</apiName>
+            <definition>primitive://String</definition>
+            <referenceName>Input:BrandVoice</referenceName>
+            <required>false</required>
+        </inputs>
         <isCitationEnabled>false</isCitationEnabled>
         <primaryModel>sfdc_ai__DefaultOpenAIGPT4OmniMini</primaryModel>
         <status>Published</status>
-        <versionIdentifier>JwgBFPm6fydyS7dWeQidExYODRMOIfZT+SmdI4qJZUY=_1</versionIdentifier>
+        <versionIdentifier>JwgBFPm6fydyS7dWeQidExYODRMOIfZT+SmdI4qJZUY=_3</versionIdentifier>
     </templateVersions>
     <type>einstein_gpt__flex</type>
     <visibility>Global</visibility>

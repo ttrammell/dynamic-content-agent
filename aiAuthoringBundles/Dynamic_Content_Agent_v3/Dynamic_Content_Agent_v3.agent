@@ -33,11 +33,29 @@ variables:
     dataGraphContext: mutable string = "None available"
         description: "Confirmed data-graph field API names available for personalization. \"None available\" until looked up -- never empty/null, since the underlying prompt template's merge resolution fails hard on a null input."
 
+    brandVoiceContext: mutable string = "None available"
+        description: "Brand record description/identity/tone from Find Brand Record -- distinct from brandContext, which is only asset pointers. Feeds Write Email Copy's tone. \"None available\" until looked up or no brand record found."
+
     structurePlanJson: mutable string = ""
         description: "The most recently planned email structure (content slots + personalization needs, no final copy), as JSON, from Plan Email Structure."
 
     copyJson: mutable string = ""
         description: "The final creative copy for the current structure plan, as JSON, from Write Email Copy."
+
+    assembledTitle: mutable string = ""
+        description: "Title from the most recently assembled content plan -- pass through to Build Dynamic Email unchanged, never retype it."
+
+    assembledSubjectLine: mutable string = ""
+        description: "Subject line from the most recently assembled content plan -- pass through to Build Dynamic Email unchanged, never retype it."
+
+    assembledPreheader: mutable string = ""
+        description: "Preheader from the most recently assembled content plan -- pass through to Build Dynamic Email unchanged, never retype it."
+
+    assembledElementsJson: mutable string = ""
+        description: "elementsJson from the most recently assembled content plan -- pass through to Build Dynamic Email unchanged. Never retype this JSON from memory -- that silently dropped a target slot in a real run."
+
+    assembledPersonalizationsJson: mutable string = ""
+        description: "personalizationsJson from the most recently assembled content plan -- pass through to Build Dynamic Email unchanged. Never retype this JSON from memory -- that silently dropped a target slot in a real run."
 
     planApproved: mutable boolean = False
         description: |
@@ -74,22 +92,22 @@ subagent email_context:
             target: "apex://FindBrandAssetsAction"
 
         find_brand_record_action:
-            description: "Search CMS brand records (colorScheme/typography/button styling) by name and return each match's contentKey. Distinct from Find Brand Assets, which only finds logo/header pictures -- without this, an email still renders with generic default colors/fonts even if the right logo/header images are used."
+            description: "Search CMS brand records (colorScheme/typography/button styling) by name and return each match's contentKey. Distinct from Find Brand Assets, which only finds logo/header pictures -- without this, an email still renders with generic default colors/fonts even if the right logo/header images are used. Omit searchTerm to list every brand record in the org."
             inputs:
                 searchTerm: string
-                    description: "Text to match against CMS brand record names, e.g. \"AMD\"."
-                    is_required: True
+                    description: "Text to match against CMS brand record names, e.g. \"AMD\". Omit to list every brand record in the org -- useful to check whether a specific brand actually has a brand record at all, distinct from just having logo/header images."
+                    is_required: False
                 maxResults: integer
                     description: "Maximum number of matches to return; defaults to 10."
             outputs:
                 success: boolean
                 brandsJson: string
-                    description: "JSON array of {name, contentKey, workspaceId} for each matching brand record. workspaceId is the CMS workspace this brand record lives in -- usable directly as contentSpaceOrFolderId."
+                    description: "JSON array of {name, contentKey, workspaceId, description, identity, tone}. workspaceId is the CMS workspace this record lives in. description/identity/tone are the brand's voice -- empty when undefined."
                 errorMessage: string
             target: "apex://FindBrandRecordAction"
 
         data_graph_details_action:
-            description: "Fetch a Data Cloud data graph definition (DMOs and fields) so you know what personalization criteria are actually available before wiring dynamic content."
+            description: "Fetch a Data Cloud data graph definition (DMOs and fields) so you know what personalization criteria are actually available before wiring dynamic content. Auto-detects the org's data graph if none is specified."
             inputs:
                 graphApiName: string
                     description: "API name of a specific Data Cloud data graph to look up. Leave blank in almost all cases -- the action auto-detects the org's data graph. Only pass a name if the user has told you this org has multiple graphs and specified which one."
@@ -130,6 +148,7 @@ subagent email_context:
             find_brand_record_tool: @actions.find_brand_record_action
                 with searchTerm = ...
                 with maxResults = ...
+                set @variables.brandVoiceContext = @outputs.brandsJson
 
             get_data_graph_details_tool: @actions.data_graph_details_action
                 with graphApiName = ...
@@ -146,39 +165,39 @@ subagent build_dynamic_email:
         plan_email_structure_action:
             description: "Decides email structure (content slots and personalization needs) from a plain-language request, without writing any final copy. Creates nothing, makes no changes."
             inputs:
-                userIntent: string
+                "Input:UserIntent": string
                     description: "Plain-language description of what the email should contain and, if applicable, how it should be personalized. Use the user's own request -- don't paraphrase away specifics they gave you."
                     is_required: True
-                brandContext: string
+                "Input:BrandContext": string
                     description: "Brand asset name-to-contentKey pairs already discovered. Omit if none found -- never fabricate this."
-                dataGraphContext: string
+                "Input:DataGraphContext": string
                     description: "Confirmed data-graph field API names available for personalization. Omit if none confirmed -- never fabricate this."
             outputs:
-                success: boolean
-                structurePlanJson: string
+                promptResponse: string
                     description: "JSON: titleGoal/subjectLineGoal/preheaderGoal, slots[] (key/type/goal -- image slots also carry contentKey/altText/widthPercent, button slots also carry linkGoal), personalizations[] (name/label/fieldApiName/scope/matchType/value/values/appliesToSlots). Contains no final copy -- goals/descriptions only."
-                errorMessage: string
-            target: "apex://PlanEmailStructureAction"
+                generationId: string
+            target: "prompt://AuraPoc_PlanEmailStructureV2"
 
         write_email_copy_action:
             description: "Writes final creative copy (title, subject line, preheader, and text for every content slot) for an already-decided structure plan from Plan Email Structure. Creates nothing, makes no changes."
             inputs:
-                structurePlanJson: string
+                "Input:StructurePlan": string
                     description: "The structurePlanJson just produced by Plan Email Structure."
                     is_required: True
-                userIntent: string
+                "Input:UserIntent": string
                     description: "The user's own original request, for tone and context."
-                brandContext: string
+                "Input:BrandContext": string
                     description: "Brand asset name-to-contentKey pairs already discovered. Omit if none found."
+                "Input:BrandVoice": string
+                    description: "The brand record's description/identity/tone (from Find Brand Record), if a brand record was found for this brand. Omit if none found -- copy will default to a neutral, professional tone."
             outputs:
-                success: boolean
-                copyJson: string
+                promptResponse: string
                     description: "JSON: title/subjectLine/preheader, and copyBySlot keyed by each slot's key -- each entry is {default, url (buttons only), byPersonalization keyed by personalization name}."
-                errorMessage: string
-            target: "apex://WriteEmailCopyAction"
+                generationId: string
+            target: "prompt://AuraPoc_WriteEmailCopy"
 
-        assemble_content_plan_action:
-            description: "Deterministically merges a structure plan and its written copy into the elementsJson/decisionsJson/targetsJson shape Build Dynamic Email expects. Makes no callouts and creates nothing."
+        assemble_content_plan_action_v2:
+            description: "Deterministically merges a structure plan and its written copy into the elementsJson/personalizationsJson shape Build Dynamic Email expects -- one PersonalizationPoint per independent personalization axis. Makes no callouts and creates nothing."
             inputs:
                 structurePlanJson: string
                     description: "The structurePlanJson from Plan Email Structure."
@@ -193,23 +212,19 @@ subagent build_dynamic_email:
                 preheader: string
                 elementsJson: string
                     description: "JSON array of content elements, ready for Build Dynamic Email."
-                decisionsJson: string
-                    description: "JSON array of decisions, ready for Build Dynamic Email. Empty when the structure plan had no personalizations."
-                targetsJson: string
-                    description: "JSON array of targets, ready for Build Dynamic Email. Empty when the structure plan had no personalizations."
+                personalizationsJson: string
+                    description: "JSON array of {ppName, ppLabel, decisionsJson, targetsJson} -- one entry per independent personalization axis, ready for Build Dynamic Email. Omitted when the structure plan had no personalizations."
                 errorMessage: string
             target: "apex://AssembleContentPlanAction"
 
-        validate_content_plan_action:
-            description: "Checks a drafted plan's elementsJson/decisionsJson/targetsJson for structural problems -- missing textByDecision entries, unknown element keys, invalid decision criteria -- before the user is ever asked to approve it. Creates nothing, makes no changes."
+        validate_content_plan_action_v2:
+            description: "Checks a drafted plan's elementsJson/personalizationsJson for structural problems -- missing textByDecision entries, unknown element keys, invalid decision criteria, too many PersonalizationPoints or decisions -- before the user is ever asked to approve it. Creates nothing, makes no changes."
             inputs:
                 elementsJson: string
                     description: "The elementsJson just produced by Assemble Content Plan."
                     is_required: True
-                decisionsJson: string
-                    description: "The decisionsJson just produced by Assemble Content Plan, if personalizing. Omit if not personalizing."
-                targetsJson: string
-                    description: "The targetsJson just produced by Assemble Content Plan, if personalizing. Omit if not personalizing."
+                personalizationsJson: string
+                    description: "The personalizationsJson just produced by Assemble Content Plan, if personalizing. Omit if not personalizing."
             outputs:
                 isValid: boolean
                 issuesJson: string
@@ -217,7 +232,7 @@ subagent build_dynamic_email:
                 errorMessage: string
             target: "apex://ValidateContentPlanAction"
 
-        build_dynamic_email_action:
+        build_dynamic_email_action_v2:
             description: "Creates a CMS email from content elements, and optionally wires in dynamic content personalization, in one atomic call. If personalization fails, the created email is deleted rather than left half-built."
             inputs:
                 contentSpaceOrFolderId: string
@@ -241,23 +256,21 @@ subagent build_dynamic_email:
                 includeBranding: boolean
                     description: "When true (default), wraps the elements with a logo/header banner and address/unsubscribe footer. Uses the org default logo/header unless logoContentKeyOverride/headerContentKeyOverride are given."
                 logoContentKeyOverride: string
-                    description: "contentKey of a specific brand's logo (from Find Brand Assets) to use in the banner instead of the org default. Only set this if the user asked for a specific brand -- never fabricate a contentKey."
+                    description: "contentKey of the logo to use in the banner -- either a specific brand's (from Find Brand Assets) or the org's own default-email-template-logo asset, per checklist step 2. Never fabricate a contentKey."
                 headerContentKeyOverride: string
-                    description: "contentKey of a specific brand's header image (from Find Brand Assets) to use in the banner instead of the org default. Only set this if the user asked for a specific brand -- never fabricate a contentKey."
+                    description: "contentKey of the header image to use in the banner -- either a specific brand's (from Find Brand Assets) or the org's own default-email-template-header asset, per checklist step 2. Never fabricate a contentKey."
+                suppressLogo: boolean
+                    description: "Set true ONLY when checklist step 2 found no brand logo AND no default-email-template-logo asset either -- omits the logo from the banner entirely instead of silently falling back to an unrelated org default. Leave false/omitted whenever any logo contentKey is available."
+                suppressHeader: boolean
+                    description: "Set true ONLY when checklist step 2 found no brand header AND no default-email-template-header asset either -- omits the header from the banner entirely instead of silently falling back to an unrelated org default. Leave false/omitted whenever any header contentKey is available."
                 brandContentKeyOverride: string
                     description: "contentKey of a specific brand's own CMS brand record (from Find Brand Record, NOT Find Brand Assets) to attach that brand's colorScheme/typography/button styling. Only set this if the user asked for a specific brand -- never fabricate a contentKey."
-                ppName: string
-                    description: "Unique DeveloperName for the PersonalizationPoint. Required only if personalizing."
-                ppLabel: string
-                    description: "Human-readable label for the PersonalizationPoint. Required only if personalizing."
-                decisionsJson: string
-                    description: "JSON array of decisions shared by every target element, e.g. [{\"name\":\"Has_First_Name_v1\",\"label\":\"Has First Name\",\"criteriaFieldApiName\":\"ssot__FirstName__c\"}]. Omit entirely (with targetsJson) for a plain, unpersonalized email."
-                targetsJson: string
-                    description: "JSON array of targets, each referencing an elementsJson \"key\" (not a CMS block id), e.g. [{\"elementKey\":\"greeting_heading\",\"textByDecision\":{\"Has_First_Name_v1\":\"Hi there!\"}}]. Every decision name in decisionsJson needs a textByDecision entry for every target."
+                personalizationsJson: string
+                    description: "JSON array of PersonalizationPoint specs, ONE PER INDEPENDENT AXIS -- e.g. [{\"ppName\":\"Industry_Personalization\",\"ppLabel\":\"Industry Personalization\",\"decisionsJson\":\"[{\\\"name\\\":\\\"Has_First_Name_v1\\\",\\\"label\\\":\\\"Has First Name\\\",\\\"criteriaFieldApiName\\\":\\\"ssot__FirstName__c\\\"}]\",\"targetsJson\":\"[{\\\"elementKey\\\":\\\"greeting_heading\\\",\\\"textByDecision\\\":{\\\"Has_First_Name_v1\\\":\\\"Hi there!\\\"}}]\"}]. Never combine unrelated personalization axes (e.g. industry AND has-first-name) into one entry's decisionsJson -- Salesforce evaluates decisions within one PersonalizationPoint as mutually-exclusive alternatives, not independently-combinable facts, so each independent axis needs its own entry. At most 3 entries, at most 10 decisions per entry. Omit entirely for a plain, unpersonalized email."
                 dataSpaceName: string
-                    description: "Data Cloud data space; defaults to 'default'."
+                    description: "Data Cloud DATA SPACE (a tenant/partition name, almost always literally 'default') -- NOT the data graph name. Leave this blank in almost all cases. Never put a data graph's name here (e.g. 'Real_Time_Data_Graph' or 'HP_Default') -- that belongs in profileDataGraphName below, a completely different field."
                 profileDataGraphName: string
-                    description: "Data graph the decisions evaluate against. Leave blank in almost all cases -- auto-detected from the org. Only pass a name if the user has told you this org has multiple graphs and specified which one."
+                    description: "The DATA GRAPH the decisions evaluate against -- this is where the graph name the user confirmed in checklist step 1 (e.g. 'Real_Time_Data_Graph') goes, never dataSpaceName above. Leave blank in almost all cases -- auto-detected from the org. Only pass a name if the user has told you this org has multiple graphs and specified which one."
             outputs:
                 success: boolean
                     description: "Whether the whole call succeeded. If personalization was requested and failed, this is false even though the email was briefly created -- it's automatically rolled back (see rolledBack)."
@@ -272,12 +285,89 @@ subagent build_dynamic_email:
                     description: "True if personalization failed and the created email was successfully deleted. If false while success is also false, the email may still exist and needs manual cleanup."
                 errorMessage: string
             target: "apex://BuildDynamicEmailAction"
-            require_user_confirmation: True
 
     reasoning:
         instructions: ->
-            | If you need brand assets or confirmed data-graph fields and don't
-              already have them, use {!@actions.lookup_email_context} first.
+            | Before drafting anything, work through this fixed checklist, in
+              order. Never decide any of these three things unilaterally --
+              always confirm with the user, but never block or fail just
+              because something wasn't found; fall back to a safe default
+              instead.
+
+              1. Data graph (only if personalization is wanted at all): call
+                 {!@actions.lookup_email_context} for data-graph fields, with
+                 graphApiName left blank on this FIRST attempt. Read the
+                 result before doing anything else:
+                 - success=true: proceed -- don't bother the user about this,
+                   whether it auto-detected one graph or resolved a name you
+                   already knew.
+                 - success=false and errorMessage lists two or more graph
+                   names (e.g. &quot;This org has 2 data graphs -- specify one:
+                   HP_Default, Real_Time_Data_Graph&quot;): STOP calling this
+                   action. Do NOT call it again with a blank graphApiName --
+                   that only ever repeats the same ambiguous error. Instead,
+                   ask the user in a plain chat message exactly which of
+                   those listed names they want (list them out), and WAIT
+                   for their reply -- do not call this action again until
+                   they answer. Once they answer, call
+                   {!@actions.lookup_email_context} ONE more time, this time
+                   passing their chosen name as graphApiName, and use that
+                   result.
+                 - success=false and errorMessage says no data graphs are
+                   configured at all (or otherwise indicates Data Cloud/
+                   personalization isn't available in this org): do NOT
+                   block, fail, retry, or get stuck -- proceed to plan a
+                   PLAIN, non-personalized email instead, and say so plainly
+                   in your summary (e.g. &quot;this org has no data graph
+                   configured, so this will be a static email without
+                   recipient-based personalization&quot;) rather than presenting
+                   it as an error.
+                 If no personalization is wanted at all, skip this step
+                 entirely -- never call this action more than twice total for
+                 one plan (once blank, once with the user&apos;s chosen name).
+
+              2. Brand assets: if the user named a specific brand, call
+                 {!@actions.lookup_email_context} for both its logo/header
+                 images AND its brand record, searching by the brand name
+                 first (e.g. &quot;Epicor&quot;). If that finds logo/header assets but
+                 the brand RECORD search comes back empty, retry the brand
+                 record search ONCE more using the identifying slug/number
+                 from an asset you already found (e.g. if the logo&apos;s urlName
+                 is &quot;epicor-78096-logo&quot;, retry with &quot;78096&quot; or
+                 &quot;epicor-78096&quot;) before concluding no brand record exists --
+                 brand records are sometimes named or tagged differently
+                 than their matching logo/header. Report plainly what you
+                 found (or state clearly if nothing was found after both
+                 attempts) and ask the user which of the found logo / header
+                 / brand record they actually want used -- never silently
+                 pick a subset of what you found (e.g. using a found header
+                 but leaving a found logo out, which mixes that brand&apos;s
+                 header with an unrelated default logo in the same banner).
+
+                 If the user did NOT name a specific brand, or named one but
+                 nothing was found for it, call
+                 {!@actions.lookup_email_context} to search for the org&apos;s
+                 own default assets by searching &quot;default email template&quot; --
+                 this org&apos;s convention names them
+                 &quot;default-email-template-logo&quot; and
+                 &quot;default-email-template-header&quot;. If found, use those
+                 contentKeys as logoContentKeyOverride/headerContentKeyOverride
+                 -- report plainly that you are using the org&apos;s default
+                 logo/header. If NOT found, set suppressLogo/suppressHeader
+                 true for whichever one has no real contentKey to use --
+                 never fall back to guessing or inventing a contentKey, and
+                 never leave a broken/blank image in the banner. This must
+                 never fail or block the build either way.
+
+              3. Call to action link: TEMPORARY testing shortcut -- do NOT
+                 ask the user for a URL. Just proceed without one -- Write
+                 Email Copy already writes the literal string
+                 &quot;PLACEHOLDER-URL-NEEDS-REAL-LINK&quot; into any button&apos;s url when
+                 no real URL was confirmed, on its own. State plainly in
+                 your summary that the CTA link is a placeholder, not a
+                 working destination. (This replaces the earlier behavior of
+                 blocking on user confirmation of a real URL -- that
+                 behavior should be restored before any real send/demo use.)
 
               Building a plan is now two separate steps, in order -- never
               skip or reorder them. First call
@@ -292,26 +382,42 @@ subagent build_dynamic_email:
               {!@actions.assemble_content_plan_tool} with that same structure
               plan and copy together -- this deterministically merges them
               into the final title/subjectLine/preheader/elementsJson/
-              decisionsJson/targetsJson. Never hand-merge these yourself and
-              never skip straight to writing copy without a structure plan
-              first.
+              personalizationsJson (one entry per independent personalization
+              axis -- never combine unrelated axes like industry and
+              has-first-name into a single entry). Never hand-merge these
+              yourself and never skip straight to writing copy without a
+              structure plan first.
 
               Before showing anything to the user, call
               {!@actions.validate_content_plan_tool} with the elementsJson/
-              decisionsJson/targetsJson you just got back from assembling the
+              personalizationsJson you just got back from assembling the
               plan. If isValid is false, do NOT show the plan for approval --
               tell the user plainly what's wrong (from issuesJson) and either
               restart the two-step planning process or ask how they'd like to
               proceed. Only proceed once validation passes.
 
               Once validation passes, write your OWN plain-language summary
-              of the assembled title, subject line, preheader, and what each
-              slot will say (including which personalizations affect which
-              slots, if any) and show it to the user in full before asking
-              them to approve it -- that summary is their only preview, so it
-              must be complete and accurate to what was actually assembled,
-              not what you originally planned to build. Then ask for their
-              explicit yes or no.
+              and show it to the user in full before asking them to approve
+              it -- that summary is their only preview, so it must be
+              complete and accurate to what was actually assembled, not what
+              you originally planned to build. Always include ALL of these,
+              every time, even when a section is empty or default:
+              1. Title, subject line, preheader.
+              2. Every content slot, its type, and both its default text and
+                 any personalized variant text (state plainly which
+                 personalization triggers which variant).
+              3. Branding: which logo/header contentKey (if any) is going in
+                 the banner, and separately, which brand RECORD contentKey
+                 (if any) is being used for colors/fonts/buttons -- state
+                 explicitly if no brand record is being applied, don't just
+                 omit it. Never present an image contentKey as if it were
+                 the brand record.
+              4. Any button URL, and whether it's a real link or a
+                 placeholder.
+              Never trim this summary down to "just the highlights" -- an
+              incomplete summary is exactly how a wrong brand reference
+              slipped through client approval undetected in a real run.
+              Then ask for their explicit yes or no.
 
               Only after the user explicitly says yes, call
               {!@actions.confirm_plan_tool} to record approval. If the user
@@ -321,17 +427,14 @@ subagent build_dynamic_email:
               Once approval is recorded, call
               {!@actions.build_dynamic_email_tool} using the fields from the
               approved plan exactly as drafted. Never change the plan's
-              content after approval. If the user asked for a specific
-              brand and you found that brand's logo/header contentKey via
-              {!@actions.lookup_email_context}, pass those as
-              logoContentKeyOverride/headerContentKeyOverride so the brand
-              actually appears in the banner -- do not also add the same
-              logo again as a separate image element in elementsJson. If you
-              also found that brand's own CMS brand record (via Find Brand
-              Record, distinct from its logo/header images), pass its
-              contentKey as brandContentKeyOverride too, so the email's
-              actual colors/fonts/buttons reflect that brand -- images alone
-              only swap pictures, not styling.
+              content after approval. Pass exactly the logo/header/brand
+              record contentKeys the user confirmed in checklist step 2
+              above as logoContentKeyOverride/headerContentKeyOverride/
+              brandContentKeyOverride -- do not also add the same logo again
+              as a separate image element in elementsJson. brandContentKeyOverride
+              must be a CMS brand RECORD's contentKey (from Find Brand
+              Record), never a logo/header image's contentKey (from Find
+              Brand Assets) -- images alone only swap pictures, not styling.
 
               If the result has success=false and rolledBack=true, tell the
               user plainly that nothing was created and ask how they'd like
@@ -344,45 +447,52 @@ subagent build_dynamic_email:
                 description: "Look up brand assets and/or confirmed data-graph fields before drafting or building an email."
 
             plan_email_structure_tool: @actions.plan_email_structure_action
-                with userIntent = ...
-                with brandContext = @variables.brandContext
-                with dataGraphContext = @variables.dataGraphContext
-                set @variables.structurePlanJson = @outputs.structurePlanJson
+                with "Input:UserIntent" = ...
+                with "Input:BrandContext" = @variables.brandContext
+                with "Input:DataGraphContext" = @variables.dataGraphContext
+                set @variables.structurePlanJson = @outputs.promptResponse
 
             write_email_copy_tool: @actions.write_email_copy_action
-                with structurePlanJson = @variables.structurePlanJson
-                with userIntent = ...
-                with brandContext = @variables.brandContext
-                set @variables.copyJson = @outputs.copyJson
+                with "Input:StructurePlan" = @variables.structurePlanJson
+                with "Input:UserIntent" = ...
+                with "Input:BrandContext" = @variables.brandContext
+                with "Input:BrandVoice" = @variables.brandVoiceContext
+                set @variables.copyJson = @outputs.promptResponse
+                available when @variables.structurePlanJson != ""
 
-            assemble_content_plan_tool: @actions.assemble_content_plan_action
+            assemble_content_plan_tool: @actions.assemble_content_plan_action_v2
                 with structurePlanJson = @variables.structurePlanJson
                 with copyJson = @variables.copyJson
+                set @variables.assembledTitle = @outputs.title
+                set @variables.assembledSubjectLine = @outputs.subjectLine
+                set @variables.assembledPreheader = @outputs.preheader
+                set @variables.assembledElementsJson = @outputs.elementsJson
+                set @variables.assembledPersonalizationsJson = @outputs.personalizationsJson
+                available when @variables.structurePlanJson != "" and @variables.copyJson != ""
 
-            validate_content_plan_tool: @actions.validate_content_plan_action
-                with elementsJson = ...
-                with decisionsJson = ...
-                with targetsJson = ...
+            validate_content_plan_tool: @actions.validate_content_plan_action_v2
+                with elementsJson = @variables.assembledElementsJson
+                with personalizationsJson = @variables.assembledPersonalizationsJson
+                available when @variables.assembledElementsJson != ""
 
             confirm_plan_tool: @utils.setVariables
                 description: "Record that the user has explicitly approved the content plan just shown to them. Only call this immediately after the user clearly says yes to that exact plan. If a new or revised plan is shown instead, this must be called again with False before it can be called again with True."
                 with planApproved = ...
 
-            build_dynamic_email_tool: @actions.build_dynamic_email_action
+            build_dynamic_email_tool: @actions.build_dynamic_email_action_v2
                 with contentSpaceOrFolderId = ...
-                with title = ...
+                with title = @variables.assembledTitle
                 with urlName = ...
-                with subjectLine = ...
-                with preheader = ...
-                with elementsJson = ...
+                with subjectLine = @variables.assembledSubjectLine
+                with preheader = @variables.assembledPreheader
+                with elementsJson = @variables.assembledElementsJson
                 with includeBranding = ...
                 with logoContentKeyOverride = ...
                 with headerContentKeyOverride = ...
+                with suppressLogo = ...
+                with suppressHeader = ...
                 with brandContentKeyOverride = ...
-                with ppName = ...
-                with ppLabel = ...
-                with decisionsJson = ...
-                with targetsJson = ...
+                with personalizationsJson = @variables.assembledPersonalizationsJson
                 with dataSpaceName = ...
                 with profileDataGraphName = ...
                 available when @variables.planApproved == True

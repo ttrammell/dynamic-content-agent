@@ -22,9 +22,12 @@ public with sharing class FindBrandRecordAction {
         @InvocableVariable(label='Success')
         public Boolean success;
 
-        // JSON array of {name, contentKey, workspaceId}. workspaceId
-        // (AuthoredManagedContentSpaceId) is the CMS workspace this brand record lives in --
-        // usable as contentSpaceOrFolderId to build an email in that brand's workspace.
+        // JSON array of {name, contentKey, workspaceId, description, identity, tone}.
+        // workspaceId (AuthoredManagedContentSpaceId) is the CMS workspace this brand record
+        // lives in -- usable as contentSpaceOrFolderId to build an email in that brand's
+        // workspace. description/identity/tone are best-effort brand-voice enrichment (see
+        // extractBrandVoice) -- empty strings when the brand record doesn't define them or the
+        // body fetch fails; never blocks the search over this optional extra.
         @InvocableVariable(label='Brands JSON')
         public String brandsJson;
 
@@ -34,6 +37,51 @@ public with sharing class FindBrandRecordAction {
 
     @TestVisible
     static AuraPocTokenSource tokenSource = new AuraPocTokenProvider();
+
+    // Pure extraction, no callout -- mirrors the marketing toolkit's own
+    // _extract_brand_profile (web/app.py), which already does this same parsing for the
+    // toolkit's native generation path. Description lives at sfdc_cms:description; identity +
+    // tone live inside sfdc_cms:einsteinBrandProperties. Returns empty strings for any field
+    // absent from contentBody -- never throws, since brand voice is optional enrichment.
+    @TestVisible
+    static Map<String, String> extractBrandVoice(Map<String, Object> contentBody) {
+        Map<String, Object> body = contentBody != null ? contentBody : new Map<String, Object>();
+        String description = body.get('sfdc_cms:description') != null ? String.valueOf(body.get('sfdc_cms:description')) : '';
+
+        Map<String, Object> einstein = body.get('sfdc_cms:einsteinBrandProperties') instanceof Map<String, Object>
+            ? (Map<String, Object>) body.get('sfdc_cms:einsteinBrandProperties') : new Map<String, Object>();
+        String identity = einstein.get('identity') != null ? String.valueOf(einstein.get('identity')) : '';
+
+        Map<String, Object> personality = einstein.get('personality') instanceof Map<String, Object>
+            ? (Map<String, Object>) einstein.get('personality') : new Map<String, Object>();
+        String tone = personality.get('defaultPersonality') != null ? String.valueOf(personality.get('defaultPersonality')) : '';
+
+        return new Map<String, String>{ 'description' => description, 'identity' => identity, 'tone' => tone };
+    }
+
+    // Best-effort fetch of a brand record's full contentBody, for brand-voice extraction only.
+    // Failures here (404, timeout, malformed body) must never fail the overall brand search --
+    // voice is an enrichment, not a requirement, unlike the name/contentKey/workspaceId the
+    // caller actually needs to build the email.
+    private static Map<String, String> fetchBrandVoice(String contentKey) {
+        try {
+            HttpRequest bodyReq = new HttpRequest();
+            bodyReq.setMethod('GET');
+            bodyReq.setEndpoint(AuraPocTokenProvider.instanceUrl() + '/services/data/v66.0/connect/cms/contents/' + contentKey);
+            bodyReq.setHeader('Authorization', 'Bearer ' + tokenSource.getAccessToken());
+            bodyReq.setTimeout(30000);
+            HttpResponse bodyRes = new Http().send(bodyReq);
+            if (bodyRes.getStatusCode() != 200) {
+                return new Map<String, String>{ 'description' => '', 'identity' => '', 'tone' => '' };
+            }
+            Map<String, Object> content = (Map<String, Object>) JSON.deserializeUntyped(bodyRes.getBody());
+            Map<String, Object> contentBody = content.get('contentBody') instanceof Map<String, Object>
+                ? (Map<String, Object>) content.get('contentBody') : new Map<String, Object>();
+            return extractBrandVoice(contentBody);
+        } catch (Exception ignored) {
+            return new Map<String, String>{ 'description' => '', 'identity' => '', 'tone' => '' };
+        }
+    }
 
     @InvocableMethod(label='Find Brand Record' description='Searches CMS brand records (colorScheme/typography/button styling) by name and returns each match\'s contentKey, for use as lightning:brandSource so an email actually renders with that brand\'s colors/fonts -- not just its logo/header images. Omit searchTerm to list every brand record in the org.')
     public static List<Result> findBrandRecord(List<Request> requests) {
@@ -99,10 +147,14 @@ public with sharing class FindBrandRecordAction {
                     if (v == null) {
                         continue;
                     }
+                    Map<String, String> voice = fetchBrandVoice(v.ManagedContentKey);
                     brands.add(new Map<String, Object>{
                         'name' => nameByContentId.get(contentId),
                         'contentKey' => v.ManagedContentKey,
-                        'workspaceId' => workspaceIdByContentId.get(contentId)
+                        'workspaceId' => workspaceIdByContentId.get(contentId),
+                        'description' => voice.get('description'),
+                        'identity' => voice.get('identity'),
+                        'tone' => voice.get('tone')
                     });
                 }
 

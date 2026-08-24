@@ -10,11 +10,11 @@ public with sharing class ValidateContentPlanAction {
         @InvocableVariable(label='Elements JSON' required=true)
         public String elementsJson;
 
-        @InvocableVariable(label='Decisions JSON')
-        public String decisionsJson;
-
-        @InvocableVariable(label='Targets JSON')
-        public String targetsJson;
+        // JSON array of {ppName, ppLabel, decisionsJson, targetsJson} -- one entry per
+        // independent personalization axis, same shape Build Dynamic Email expects. Omit for a
+        // plain, unpersonalized plan.
+        @InvocableVariable(label='Personalizations JSON')
+        public String personalizationsJson;
     }
 
     public class Result {
@@ -29,7 +29,7 @@ public with sharing class ValidateContentPlanAction {
         public String errorMessage;
     }
 
-    @InvocableMethod(label='Validate Content Plan' description='Checks a drafted content plan (elementsJson/decisionsJson/targetsJson) for structural problems -- missing textByDecision entries, unknown element keys, invalid decision criteria -- before asking the user to approve it. Makes no changes and creates nothing.')
+    @InvocableMethod(label='Validate Content Plan' description='Checks a drafted content plan (elementsJson/personalizationsJson) for structural problems -- missing textByDecision entries, unknown element keys, invalid decision criteria, too many PersonalizationPoints or decisions -- before asking the user to approve it. Makes no changes and creates nothing.')
     public static List<Result> validateContentPlan(List<Request> requests) {
         List<Result> results = new List<Result>();
         for (Request req : requests) {
@@ -43,44 +43,70 @@ public with sharing class ValidateContentPlanAction {
                     elementKeys.add(String.valueOf(el.get('key')));
                 }
 
-                Boolean wantsPersonalization = String.isNotBlank(req.decisionsJson) && String.isNotBlank(req.targetsJson);
-                if (wantsPersonalization) {
-                    List<Object> decisionSpecs = (List<Object>) JSON.deserializeUntyped(req.decisionsJson);
-                    List<Object> targetSpecs = (List<Object>) JSON.deserializeUntyped(req.targetsJson);
-                    List<String> decisionNames = new List<String>();
+                if (String.isNotBlank(req.personalizationsJson)) {
+                    List<Object> ppSpecs = (List<Object>) JSON.deserializeUntyped(req.personalizationsJson);
 
-                    for (Object specObj : decisionSpecs) {
-                        Map<String, Object> spec = (Map<String, Object>) specObj;
-                        decisionNames.add(String.valueOf(spec.get('name')));
-                        try {
-                            BuildDynamicEmailAction.buildDecisionCriteria(spec);
-                        } catch (Exception criteriaEx) {
-                            issues.add('Decision "' + spec.get('name') + '": ' + criteriaEx.getMessage());
-                        }
+                    if (ppSpecs.size() > BuildDynamicEmailAction.MAX_PPS_PER_EMAIL) {
+                        issues.add('Plan has ' + ppSpecs.size() + ' PersonalizationPoints, but at most '
+                            + BuildDynamicEmailAction.MAX_PPS_PER_EMAIL + ' are supported per email.');
                     }
 
-                    for (Object targetObj : targetSpecs) {
-                        Map<String, Object> target = (Map<String, Object>) targetObj;
-                        String elementKey = String.valueOf(target.get('elementKey'));
-                        if (!elementKeys.contains(elementKey)) {
-                            issues.add('Target references unknown element key "' + elementKey + '" -- must match a "key" from elementsJson.');
+                    for (Object ppSpecObj : ppSpecs) {
+                        Map<String, Object> ppSpec = (Map<String, Object>) ppSpecObj;
+                        String ppLabel = String.valueOf(ppSpec.get('ppLabel'));
+
+                        List<Object> decisionSpecs;
+                        List<Object> targetSpecs;
+                        try {
+                            decisionSpecs = (List<Object>) JSON.deserializeUntyped(String.valueOf(ppSpec.get('decisionsJson')));
+                            targetSpecs = (List<Object>) JSON.deserializeUntyped(String.valueOf(ppSpec.get('targetsJson')));
+                        } catch (Exception parseEx) {
+                            issues.add('PersonalizationPoint "' + ppLabel + '": could not parse decisionsJson/targetsJson: ' + parseEx.getMessage());
                             continue;
                         }
-                        String blockDefinition = target.get('blockDefinition') != null
-                            ? String.valueOf(target.get('blockDefinition')) : 'lightning/paragraph';
-                        Map<String, Object> textByDecision = (Map<String, Object>) target.get('textByDecision');
 
-                        for (String decisionName : decisionNames) {
-                            if (textByDecision == null || !textByDecision.containsKey(decisionName)) {
-                                issues.add('Target "' + elementKey + '" is missing a rule for decision "' + decisionName + '".');
+                        if (decisionSpecs.size() > BuildDynamicEmailAction.MAX_DECISIONS_PER_PP) {
+                            issues.add('PersonalizationPoint "' + ppLabel + '" has ' + decisionSpecs.size()
+                                + ' decisions, but at most ' + BuildDynamicEmailAction.MAX_DECISIONS_PER_PP + ' are supported.');
+                        }
+
+                        List<String> decisionNames = new List<String>();
+                        for (Object specObj : decisionSpecs) {
+                            Map<String, Object> spec = (Map<String, Object>) specObj;
+                            decisionNames.add(String.valueOf(spec.get('name')));
+                            try {
+                                BuildDynamicEmailAction.buildDecisionCriteria(spec);
+                            } catch (Exception criteriaEx) {
+                                issues.add('PersonalizationPoint "' + ppLabel + '" decision "' + spec.get('name') + '": ' + criteriaEx.getMessage());
+                            }
+                        }
+
+                        for (Object targetObj : targetSpecs) {
+                            Map<String, Object> target = (Map<String, Object>) targetObj;
+                            String elementKey = String.valueOf(target.get('elementKey'));
+                            if (!elementKeys.contains(elementKey)) {
+                                issues.add('PersonalizationPoint "' + ppLabel + '" target references unknown element key "' + elementKey
+                                    + '" -- must match a "key" from elementsJson.');
                                 continue;
                             }
-                            if (blockDefinition == 'lightning/image') {
-                                Object decisionValue = textByDecision.get(decisionName);
-                                String contentKey = (decisionValue instanceof Map<String, Object>)
-                                    ? String.valueOf(((Map<String, Object>) decisionValue).get('contentKey')) : null;
-                                if (String.isBlank(contentKey) || contentKey == 'null') {
-                                    issues.add('Target "' + elementKey + '" (image) is missing a valid contentKey for decision "' + decisionName + '".');
+                            String blockDefinition = target.get('blockDefinition') != null
+                                ? String.valueOf(target.get('blockDefinition')) : 'lightning/paragraph';
+                            Map<String, Object> textByDecision = (Map<String, Object>) target.get('textByDecision');
+
+                            for (String decisionName : decisionNames) {
+                                if (textByDecision == null || !textByDecision.containsKey(decisionName)) {
+                                    issues.add('PersonalizationPoint "' + ppLabel + '" target "' + elementKey
+                                        + '" is missing a rule for decision "' + decisionName + '".');
+                                    continue;
+                                }
+                                if (blockDefinition == 'lightning/image') {
+                                    Object decisionValue = textByDecision.get(decisionName);
+                                    String contentKey = (decisionValue instanceof Map<String, Object>)
+                                        ? String.valueOf(((Map<String, Object>) decisionValue).get('contentKey')) : null;
+                                    if (String.isBlank(contentKey) || contentKey == 'null') {
+                                        issues.add('PersonalizationPoint "' + ppLabel + '" target "' + elementKey
+                                            + '" (image) is missing a valid contentKey for decision "' + decisionName + '".');
+                                    }
                                 }
                             }
                         }

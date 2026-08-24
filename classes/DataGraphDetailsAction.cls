@@ -67,10 +67,10 @@ public with sharing class DataGraphDetailsAction {
     public class NoGraphFoundException extends Exception {}
 
     // The Data Cloud Connect API's data-graphs endpoint is get-by-name only -- it has no
-    // "list" operation. Every org can (and here, does) use a different developer name for
-    // its data graph, so hardcoding or guessing a name (e.g. copying the name from this
-    // action's own description) silently 404s in any org that named it differently. Tooling
-    // API's DataGraphDefinition is the only way to discover what actually exists.
+    // "list" operation. Every org can (and does) use a different developer name for its data
+    // graph, so hardcoding or guessing a name (e.g. copying the name from this action's own
+    // description) silently 404s in any org that named it differently. Tooling API's
+    // DataGraphDefinition is the only way to discover what actually exists.
     private static List<String> listDataGraphApiNames(String accessToken) {
         HttpRequest httpReq = new HttpRequest();
         httpReq.setMethod('GET');
@@ -109,6 +109,7 @@ public with sharing class DataGraphDetailsAction {
     // fall back to discovery via Tooling API. Auto-picks when exactly one graph exists in the
     // org (the common case); otherwise fails loudly with the real list of names rather than
     // guessing, so the agent can ask the user instead of reporting a false "none configured".
+    // PUBLIC because BuildDynamicEmailAction.cls also calls this.
     public static String resolveGraphApiName(String accessToken, String requestedName) {
         if (String.isNotBlank(requestedName)) {
             HttpResponse probe = fetchGraph(accessToken, requestedName);

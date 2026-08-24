@@ -23,8 +23,10 @@ Before deploying to a brand-new org, open `aiAuthoringBundles/Dynamic_Content_Ag
 ## What gets deployed
 
 - The agent's Agent Script bundle (`AiAuthoringBundle`)
-- 2 GenAI prompt templates: `AuraPoc_PlanEmailStructure`, `AuraPoc_WriteEmailCopy`
-- 14 Apex classes: 8 agent actions (`FindBrandAssetsAction`, `FindBrandRecordAction`, `DataGraphDetailsAction`, `PlanEmailStructureAction`, `WriteEmailCopyAction`, `AssembleContentPlanAction`, `ValidateContentPlanAction`, `BuildDynamicEmailAction`) plus 6 shared utility/auth classes (`AuraPocTokenProvider`, `AuraPocTokenSource`, `AuraServiceClient`, `AuraSessionMinter`, `LlmCompletionProvider`, `NativePromptTemplateProvider`)
+- 2 GenAI prompt templates, bound **natively** as agent actions (not called from Apex): `AuraPoc_PlanEmailStructureV2`, `AuraPoc_WriteEmailCopy`
+- 10 Apex classes: 6 agent actions (`FindBrandAssetsAction`, `FindBrandRecordAction`, `DataGraphDetailsAction`, `AssembleContentPlanAction`, `ValidateContentPlanAction`, `BuildDynamicEmailAction`) plus 4 shared utility/auth classes (`AuraPocTokenProvider`, `AuraPocTokenSource`, `AuraServiceClient`, `AuraSessionMinter`)
+
+  As of this refactor, planning and copywriting are handled by direct native prompt-template bindings in the agent script itself, not Apex-mediated calls — the earlier `PlanEmailStructureAction`/`WriteEmailCopyAction`/`NativePromptTemplateProvider`/`LlmCompletionProvider` classes are gone from this package because nothing calls them anymore.
 - The `AuraPoc_Config__mdt` custom metadata type (its **type only** — the `Default` record ships with placeholder values you must fill in, see Step 4 below)
 - A fresh self-signed `AuraPoc_JwtCert` certificate — Salesforce generates a brand-new private key for whichever org you deploy into; nothing is copied from anywhere
 - A base `AuraPoc_JwtApp` External Client App record (name/label only — its OAuth/JWT settings are not deployable metadata, see Step 2)
