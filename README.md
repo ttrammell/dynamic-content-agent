@@ -10,11 +10,15 @@ Click the link, log into your target org, and deploy. That covers the metadata o
 
 ## Install via CLI instead
 
+This repo is laid out as **classic (non-SFDX) Metadata API format** — `package.xml` and every metadata type folder (`classes/`, `objects/`, `aiAuthoringBundles/`, etc.) sit directly at the repo root, not nested under `force-app/main/default/`. This is deliberate: the "Install via link" tool above shells out to the `sfdx` CLI to convert genuine SFDX-formatted repos (ones with an `sfdx-project.json`), and that binary isn't installed on the host running that tool — using classic format avoids that conversion step entirely and lets the tool deploy directly via the Metadata API.
+
 ```
-sf project deploy start -x manifest/package.xml -o <target-org-alias>
+sf project deploy start --metadata-dir . -o <target-org-alias>
 ```
 
-Before deploying to a brand-new org, open `force-app/main/default/aiAuthoringBundles/Dynamic_Content_Agent_v3/Dynamic_Content_Agent_v3.bundle-meta.xml` and make sure `<target>` is blank (`<target></target>`) — a blank target creates a fresh v1 in the new org; a version reference from wherever you retrieved this (e.g. `Dynamic_Content_Agent_v3.v12`) won't exist there and the deploy will fail.
+(Older `sf`/`sfdx` versions: `sf force:mdapi:deploy --deploydir . --wait 10 -o <target-org-alias>`.)
+
+Before deploying to a brand-new org, open `aiAuthoringBundles/Dynamic_Content_Agent_v3/Dynamic_Content_Agent_v3.bundle-meta.xml` and make sure `<target>` is blank (`<target></target>`) — a blank target creates a fresh v1 in the new org; a version reference from wherever you retrieved this (e.g. `Dynamic_Content_Agent_v3.v12`) won't exist there and the deploy will fail.
 
 ## What gets deployed
 
