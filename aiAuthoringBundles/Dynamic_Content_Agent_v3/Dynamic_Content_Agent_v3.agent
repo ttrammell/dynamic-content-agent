@@ -778,8 +778,8 @@ subagent plan:
 
         actions:
             confirm_plan_tool: @utils.setVariables
-                description: "Record whether the user EXPLICITLY approved the plan summary you just showed. Set planApproved to true when they clearly say yes / approved / looks good / proceed / build it. Only after this is build_dynamic_email_tool available. If the user wants a change, re-plan instead."
-                with base_content_planApproved = ...
+                description: "Call this ONLY when the user EXPLICITLY approves the plan summary you just showed (clearly says yes / approved / looks good / proceed / build it). Calling it always records approval -- there is no case where you call this tool and approval is NOT recorded. Only after this is build_dynamic_email_tool available. If the user wants a change instead, re-plan -- do not call this tool."
+                with base_content_planApproved = true
 
             build_dynamic_email_tool: @actions.build_dynamic_email_action_v2
                 with contentSpaceOrFolderId = @variables.base_brand_workspaceId
