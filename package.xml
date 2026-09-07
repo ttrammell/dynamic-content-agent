@@ -6,15 +6,18 @@
     </types>
     <types>
         <members>AuraPoc_PlanEmailStructureV2</members>
-        <members>AuraPoc_WriteEmailCopy</members>
+        <members>AuraPoc_FillSlot</members>
         <name>GenAiPromptTemplate</name>
     </types>
     <types>
         <members>AssembleContentPlanAction</members>
         <members>BuildDynamicEmailAction</members>
+        <members>ConfirmBuildAction</members>
         <members>DataGraphDetailsAction</members>
+        <members>FillCopyAction</members>
         <members>FindBrandAssetsAction</members>
         <members>FindBrandRecordAction</members>
+        <members>ResolveBrandingAction</members>
         <members>ValidateContentPlanAction</members>
         <members>AuraPocTokenProvider</members>
         <members>AuraPocTokenSource</members>

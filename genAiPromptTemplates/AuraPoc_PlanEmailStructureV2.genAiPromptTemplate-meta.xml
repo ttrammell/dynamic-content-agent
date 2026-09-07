@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <GenAiPromptTemplate xmlns="http://soap.sforce.com/2006/04/metadata">
-    <activeVersionIdentifier>JwgBFPm6fydyS7dWeQidExYODRMOIfZT+SmdI4qJZUY=_5</activeVersionIdentifier>
+    <activeVersionIdentifier>JwgBFPm6fydyS7dWeQidExYODRMOIfZT+SmdI4qJZUY=_16</activeVersionIdentifier>
     <developerName>AuraPoc_PlanEmailStructureV2</developerName>
     <masterLabel>AuraPoc: Plan Email Structure V2</masterLabel>
     <overridable>false</overridable>
@@ -20,6 +20,9 @@ Output ONLY a single JSON object, no markdown fences, no commentary. Its shape i
   &quot;titleGoal&quot;: &quot;one sentence: what the internal title should communicate&quot;,
   &quot;subjectLineGoal&quot;: &quot;one sentence: what the subject line should communicate&quot;,
   &quot;preheaderGoal&quot;: &quot;one sentence: what the preheader should communicate&quot;,
+  &quot;userIntent&quot;: &quot;copy the User&apos;s request above back VERBATIM (used downstream to detect translate/multi-lingual intent) -- do not paraphrase or shorten&quot;,
+  &quot;fullTranslate&quot;: false,
+  &quot;translateCountries&quot;: [&quot;FR&quot;, &quot;ES&quot;, &quot;JP&quot;],
   &quot;slots&quot;: [
     {&quot;key&quot;: &quot;greeting_heading&quot;, &quot;type&quot;: &quot;heading&quot;, &quot;goal&quot;: &quot;one sentence describing what this element should accomplish&quot;},
     {&quot;key&quot;: &quot;greeting_paragraph&quot;, &quot;type&quot;: &quot;paragraph&quot;, &quot;goal&quot;: &quot;...&quot;},
@@ -30,36 +33,36 @@ Output ONLY a single JSON object, no markdown fences, no commentary. Its shape i
   ],
   &quot;personalizations&quot;: [
     {
-      &quot;name&quot;: &quot;Has_First_Name_v1&quot;, &quot;label&quot;: &quot;Has First Name&quot;,
-      &quot;fieldApiName&quot;: &quot;ssot__FirstName__c&quot;,
-      &quot;scope&quot;: &quot;Recipient&quot;,
+      &quot;name&quot;: &quot;&lt;UniqueName_A&gt;&quot;, &quot;label&quot;: &quot;&lt;Human Label A&gt;&quot;,
+      &quot;fieldApiName&quot;: &quot;&lt;a fieldApiName copied from Confirmed data-graph fields&gt;&quot;,
+      &quot;scope&quot;: &quot;&lt;the scope that field&apos;s dmoName maps to&gt;&quot;,
       &quot;matchType&quot;: &quot;HasValue&quot;,
-      &quot;appliesToSlots&quot;: [&quot;greeting_heading&quot;]
+      &quot;appliesToSlots&quot;: [&quot;&lt;a real slot key&gt;&quot;]
     },
     {
-      &quot;name&quot;: &quot;Is_Technology_v1&quot;, &quot;label&quot;: &quot;Technology Industry&quot;,
-      &quot;fieldApiName&quot;: &quot;ssot__IndustryId__c&quot;,
-      &quot;scope&quot;: &quot;RecipientLead&quot;,
-      &quot;matchType&quot;: &quot;Equals&quot;, &quot;value&quot;: &quot;Technology&quot;,
-      &quot;appliesToSlots&quot;: [&quot;greeting_paragraph&quot;]
+      &quot;name&quot;: &quot;&lt;UniqueName_B1&gt;&quot;, &quot;label&quot;: &quot;&lt;Human Label B1&gt;&quot;,
+      &quot;fieldApiName&quot;: &quot;&lt;a categorical fieldApiName from Confirmed data-graph fields&gt;&quot;,
+      &quot;scope&quot;: &quot;&lt;the scope that field&apos;s dmoName maps to&gt;&quot;,
+      &quot;matchType&quot;: &quot;Equals&quot;, &quot;value&quot;: &quot;&lt;one real category value the user asked for&gt;&quot;,
+      &quot;appliesToSlots&quot;: [&quot;&lt;a real slot key&gt;&quot;]
     },
     {
-      &quot;name&quot;: &quot;Is_Healthcare_v1&quot;, &quot;label&quot;: &quot;Healthcare Industry&quot;,
-      &quot;fieldApiName&quot;: &quot;ssot__IndustryId__c&quot;,
-      &quot;scope&quot;: &quot;RecipientLead&quot;,
-      &quot;matchType&quot;: &quot;Equals&quot;, &quot;value&quot;: &quot;Healthcare&quot;,
-      &quot;appliesToSlots&quot;: [&quot;greeting_paragraph&quot;]
+      &quot;name&quot;: &quot;&lt;UniqueName_B2&gt;&quot;, &quot;label&quot;: &quot;&lt;Human Label B2&gt;&quot;,
+      &quot;fieldApiName&quot;: &quot;&lt;the SAME categorical fieldApiName as B1&gt;&quot;,
+      &quot;scope&quot;: &quot;&lt;the SAME scope as B1&gt;&quot;,
+      &quot;matchType&quot;: &quot;Equals&quot;, &quot;value&quot;: &quot;&lt;another real category value the user asked for&gt;&quot;,
+      &quot;appliesToSlots&quot;: [&quot;&lt;a real slot key&gt;&quot;]
     }
   ]
 }
-This example shows the pattern for a CATEGORICAL field where each category needs its own wording (industry here) -- one personalization PER distinct value, all sharing the same fieldApiName+scope, each with its own real value from what the user asked for or what the confirmed data actually contains. Never invent industry/category values -- use the ones the user named, or values you can see are actually used in Confirmed data-graph fields/context above.
+CRITICAL -- every angle-bracket &lt;...&gt; token above is a PLACEHOLDER you MUST replace; NEVER output a literal &lt;...&gt; token. Do NOT copy any specific field name, value, label, or personalization name from these instructions. In particular, do NOT default to a first-name check or to Technology/Healthcare industry rules -- emit those ONLY if the user&apos;s actual request calls for them. The two &quot;Equals&quot; entries above only illustrate the CATEGORICAL pattern (one personalization PER distinct value the user named, all sharing the same fieldApiName+scope); the A entry only illustrates a presence check. Derive EVERY personalization -- how many, which fields, which values -- strictly from {!$Input:UserIntent} matched against the confirmed fields in Confirmed data-graph fields above. If the user&apos;s request does not call for personalization, output an empty personalizations array [].
 
 Each slot&apos;s &quot;type&quot; must be exactly one of: heading, paragraph, image, button. Do not include an image slot unless a specific brand asset for it is listed above -- if none fits, omit the image slot and note why in another slot&apos;s goal instead of inventing one.
 
 Each personalization entry supports these fields:
 - &quot;name&quot;: unique identifier, letters/digits/underscores only.
 - &quot;label&quot;: human-readable label.
-- &quot;fieldApiName&quot;: must be one of the fieldApiNames listed in Confirmed data-graph fields above -- never invent one. If personalization is wanted but no confirmed field fits, omit that personalization entirely rather than inventing a fieldApiName.
+- &quot;fieldApiName&quot;: must be one of the fieldApiNames literally listed in Confirmed data-graph fields above -- never invent one, and never reuse a field name mentioned only as an EXAMPLE elsewhere in these instructions (e.g. in the scope-mapping illustration below) as if it were confirmed for this org. If personalization is wanted but no confirmed field fits, omit that personalization entirely rather than inventing a fieldApiName.
 - &quot;scope&quot;: WHERE that field lives, chosen from this fixed list only -- never write a raw object/DMO name yourself, just pick the matching option by what the field&apos;s dmoName is in Confirmed data-graph fields above:
   dmoName UnifiedIndividual__dlm (the recipient&apos;s own root record) -&gt; &quot;Recipient&quot;
   dmoName ssot__Account__dlm -&gt; &quot;RecipientAccount&quot;
@@ -69,29 +72,37 @@ Each personalization entry supports these fields:
   dmoName ssot__Lead__dlm -&gt; &quot;RecipientLead&quot;
   If the field&apos;s dmoName doesn&apos;t match any of these six, this personalization cannot be built right now -- omit it rather than guessing a scope.
 
-When the user&apos;s request is open-ended about personalization (e.g. &quot;make it relevant per recipient&quot; without saying how), a real-usage survey of this org&apos;s existing dynamic content (296 decisions across 113 personalization points) shows these CATEGORIES are by far the most common -- prefer matching a confirmed data-graph field into one of these categories before reaching for a rarer one. The scope shown next to each is only the MOST TYPICAL one seen in that survey, NOT a fixed rule -- the scope you actually write is ALWAYS whatever the confirmed field&apos;s real dmoName maps to per the six-option list above, even if that differs from the typical scope shown here (e.g. if this org&apos;s industry field is ssot__PrimaryIndustry__c on ssot__Account__dlm, its scope is &quot;RecipientAccount&quot;, NOT &quot;RecipientLead&quot;, regardless of what&apos;s typical elsewhere):
+When the user&apos;s request is open-ended about personalization (e.g. &quot;make it relevant per recipient&quot; without saying how), a real-usage survey of this org&apos;s existing dynamic content (296 decisions across 113 personalization points) shows these CATEGORIES are by far the most common -- prefer matching a confirmed data-graph field into one of these categories before reaching for a rarer one. The scope shown next to each is only the MOST TYPICAL one seen in that survey, NOT a fixed rule -- the scope you actually write is ALWAYS whatever the CONFIRMED field&apos;s real dmoName maps to per the six-option list above, even if that differs from the typical scope shown here. This is a hypothetical illustration, not a real field name, so it can never be mistaken for a confirmed one -- if an org&apos;s industry field happened to be named &quot;Example_Industry_Field__c&quot; on ssot__Account__dlm, its scope would be &quot;RecipientAccount&quot;, NOT &quot;RecipientLead&quot;, regardless of what&apos;s typical elsewhere. The actual field name you use must come from Confirmed data-graph fields above, never from an example in these instructions:
   1. Industry (typically scope &quot;RecipientLead&quot;, but check the confirmed field&apos;s real dmoName) -- ~31% of real decisions.
   2. Email engagement persona / lifecycle stage, e.g. dormant vs. loyalist (typically scope &quot;RecipientEmailEngagement&quot;) -- ~23%.
   3. Recipient name or title has-value, e.g. greet by first name (typically scope &quot;Recipient&quot;) -- ~11%.
   4. Region or state (typically scope &quot;RecipientAddress&quot;) -- ~10%.
   Account segment/type such as Enterprise vs. SMB (typically scope &quot;RecipientAccount&quot;) and language preference (typically scope &quot;RecipientProfile&quot;) are valid and do occur, but far less often -- only reach for them when the user&apos;s request specifically calls for company size/tier or language, not as a default guess.
-- &quot;matchType&quot;: &quot;HasValue&quot; (default -- field just needs to be non-empty, no value needed) | &quot;Equals&quot; (needs &quot;value&quot;, a single string) | &quot;In&quot; (needs &quot;values&quot;, a non-empty array of strings). For StateProvince fields, value/values must be 2-letter uppercase codes, never full names.
-  CRITICAL: &quot;HasValue&quot; only means &quot;does this field have ANY value at all&quot; -- confirmed live that using HasValue for a request like &quot;vary by industry&quot; produces a useless &quot;field is populated&quot; check instead of real per-industry copy. Whenever the user wants DIFFERENT wording per category/value of a field (industry, region, tier, persona, language, etc.), you MUST use &quot;Equals&quot; and create one personalization PER distinct value the user named (see the Is_Technology_v1/Is_Healthcare_v1 example above) -- never a single HasValue check standing in for &quot;vary by X&quot;. Only use HasValue for genuine presence checks like &quot;greet them by name IF we know it.&quot;
+- &quot;matchType&quot;: &quot;HasValue&quot; (default -- field just needs to be non-empty, no value needed) | &quot;Equals&quot; (needs &quot;value&quot;, a single string) | &quot;In&quot; (needs &quot;values&quot;, a non-empty array of strings). NEVER emit &quot;In&quot; with a missing or empty &quot;values&quot; array -- if you have no concrete values, use &quot;HasValue&quot; or omit the personalization entirely. For a StateProvince region split you may put the region NAME(s) (&quot;West&quot;/&quot;East&quot;/&quot;Central&quot;) in &quot;values&quot; and the system expands them to the correct 2-letter state codes; otherwise use explicit 2-letter uppercase codes.
+  CRITICAL: &quot;HasValue&quot; only means &quot;does this field have ANY value at all&quot; -- confirmed live that using HasValue for a request like &quot;vary by industry&quot; produces a useless &quot;field is populated&quot; check instead of real per-industry copy. Whenever the user wants DIFFERENT wording per category/value of a field (industry, region, tier, persona, language, etc.), you MUST use &quot;Equals&quot; and create one personalization PER distinct value the user named (see the categorical &quot;Equals&quot; placeholder pattern above) -- never a single HasValue check standing in for &quot;vary by X&quot;. Only use HasValue for genuine presence checks like &quot;greet them by name IF we know it.&quot;
   Industry values specifically -- when the field is an industry field (dmoName ssot__Lead__dlm.ssot__IndustryId__c or ssot__Account__dlm.ssot__PrimaryIndustry__c), pick &quot;value&quot; from this known list, matched exactly (case and spelling): Education, Healthcare, Technology, Retail, Finance, Manufacturing, Government, Insurance, Communications, Hospitality, Consulting, Transportation, Environmental. If the user says &quot;pick N industries&quot; without naming them, pick N distinct values from this exact list -- never invent an industry name that isn&apos;t on it.
   Email engagement persona specifically -- field ssot__EmailEngagementPersona__c (dmoName ssot__EmailEngagementScore__dlm, scope &quot;RecipientEmailEngagement&quot;): the only three real values are &quot;Engaged Loyalist&quot;, &quot;Window Shopper&quot;, &quot;Dormant&quot; -- match this exact case, never invent a persona name.
-  Region/state specifically -- field ssot__StateProvinceId__c (scope &quot;RecipientAddress&quot;, matchType &quot;In&quot;): when the user says a region name instead of listing states, use these exact 2-letter code sets -- West=[&quot;CA&quot;,&quot;WA&quot;,&quot;OR&quot;,&quot;NV&quot;,&quot;AZ&quot;], East=[&quot;NY&quot;,&quot;NJ&quot;,&quot;MA&quot;,&quot;PA&quot;,&quot;FL&quot;,&quot;GA&quot;], Central=[&quot;IL&quot;,&quot;TX&quot;,&quot;CO&quot;,&quot;KS&quot;].
+  Region/state specifically -- field ssot__StateProvinceId__c (scope &quot;RecipientAddress&quot;, matchType &quot;In&quot;): the SIMPLEST correct output is to put the region NAME(s) directly in &quot;values&quot; -- e.g. &quot;values&quot;:[&quot;West&quot;] or [&quot;East&quot;] or [&quot;Central&quot;]. The system deterministically expands each region name to its 2-letter state codes, so you do NOT need to (and should not) list individual states yourself. One personalization per region, and never leave &quot;values&quot; empty.
+  Language/country specifically -- for ANY multi-language request, personalize by field ssot__CountryId__c (dmoName ssot__ContactPointAddress__dlm, scope &quot;RecipientAddress&quot;, matchType &quot;Equals&quot;), NEVER a language field (there is none). All the language decisions share ssot__CountryId__c so they form a SINGLE PersonalizationPoint (one language axis). Do NOT translate any copy yourself -- each variant is written in its language automatically downstream (US/UK -&gt; English, JP -&gt; Japanese, FR -&gt; French, ES/SP -&gt; Spanish, DE -&gt; German, IT -&gt; Italian, BR/PT -&gt; Portuguese, CN -&gt; Chinese, KR -&gt; Korean). Two shapes:
+  (a) LOCALIZE A SECTION -- the user personalizes specific content by country (e.g. &quot;a regional note for Japan and France&quot;): one language PP on ONE slot, one decision per country named.
+  (b) FULL TRANSLATE -- the user asks to translate/localize the WHOLE email. Translation is one of this builder&apos;s two core jobs, so recognize it broadly: &quot;translate this&quot;, &quot;translate the email&quot;, &quot;full translate&quot;, &quot;a multi-lingual email&quot;, &quot;multilingual&quot;, &quot;a multi-language email&quot;, &quot;in multiple languages&quot;, &quot;in several/different languages&quot;, &quot;localize the whole/entire email&quot;, or naming 2+ languages/countries to render the email in. In this case you do NOT hand-build the language personalizations yourself. Instead, at the TOP LEVEL of your JSON: set &quot;fullTranslate&quot;: true, and set &quot;translateCountries&quot; to the countries the user named (2-letter forms, e.g. [&quot;FR&quot;,&quot;DE&quot;]) or leave it as the default [&quot;FR&quot;,&quot;ES&quot;,&quot;JP&quot;] (English is the untranslated base -- no decision needed) when they didn&apos;t name a set. Leave &quot;personalizations&quot; EMPTY ([]) for a pure full-translate (a deterministic downstream step builds the single Country PersonalizationPoint across every text slot and writes each variant in-language -- so listing them here would only risk conflicts). CRITICAL for full translate: because EVERY text slot is multiplied by the number of languages, keep the email COMPACT so the copy stays within the cell budget -- a heading, at most TWO short body paragraphs, and the CTA (~4 text slots). Do NOT add extra or long body paragraphs in a full-translate email. For a partial localization (shape (a) above -- only ONE section varies by country), keep &quot;fullTranslate&quot;: false and emit that single-slot language PP normally.
+  ROUTING -- full-translate is EXCLUSIVE (one Country axis, one PP, N language variants, across the WHOLE email and NOTHING else). So set &quot;fullTranslate&quot;: true ONLY when the WHOLE email is being translated AND there is no other per-recipient personalization requested. If the user wants translation TOGETHER WITH other personalization (e.g. &quot;translate AND vary by industry&quot;, &quot;multi-lingual and personalized by name/tier&quot;), that is NORMAL mode, NOT full-translate: keep &quot;fullTranslate&quot;: false, emit the requested axes (industry/tier/name/etc.) normally, AND express the translation as shape (a) -- a single Country PP on ONE section slot (its own slot, separate from the other axes&apos; slots per the one-axis-per-slot rule). In normal mode translation is confined to that one area, which is expected; do not spread it across every slot.
+  ALWAYS include the top-level &quot;fullTranslate&quot; boolean (true only for a whole-email translate with no other personalization, false otherwise), &quot;translateCountries&quot; (the default set is fine when not translating), and &quot;userIntent&quot; (the user&apos;s request copied back verbatim).
   Account tier/company size specifically -- field ssot__AccountTypeId__c (dmoName ssot__Account__dlm, scope &quot;RecipientAccount&quot;): the known values are &quot;Mid-Market&quot;, &quot;Enterprise&quot;, &quot;Small Business&quot;, &quot;Partner&quot;, &quot;Other&quot; -- match this exact case.
   Lead source specifically -- field ssot__LeadSourceId__c (dmoName ssot__Lead__dlm, scope &quot;RecipientLead&quot;): known values are &quot;Web&quot;, &quot;LinkedIn&quot;, &quot;Referral&quot;, &quot;Email Campaign&quot;, &quot;Event&quot;, &quot;Website&quot;, &quot;Social Media&quot;, &quot;Cold Call&quot;, &quot;Marketing Event&quot;.
   Lead status specifically -- field ssot__LeadStatusId__c (dmoName ssot__Lead__dlm, scope &quot;RecipientLead&quot;): known values are &quot;New&quot;, &quot;Working&quot;, &quot;Contacted&quot;, &quot;Qualified&quot;, &quot;Unqualified&quot;, &quot;Converted&quot;.
 - &quot;appliesToSlots&quot;: array of slot &quot;key&quot;s (from the slots list) this personalization affects. Must reference real slot keys.
+  SLIMMER BY DEFAULT -- ONE SLOT PER AXIS: by default, give each personalization axis exactly ONE dedicated slot (its &quot;appliesToSlots&quot; holds a single slot key), and keep the whole structure lean -- do NOT add several body paragraphs that all carry the same axis. A tight plan is a heading, a short generic intro paragraph, ONE dedicated paragraph per personalization axis, and the CTA -- not many redundant paragraphs. Only put one axis on MULTIPLE slots when the user EXPLICITLY asks for it (e.g. &quot;personalize BOTH the intro AND the closing by industry&quot;). Repeating the same axis across extra unrequested paragraphs just bloats the email with duplicate variants.
+  CRITICAL -- ONE AXIS PER SLOT: two personalizations on DIFFERENT fields (independent axes, e.g. Account Type AND Region) must NEVER share a slot. A single content block can carry only ONE personalization axis; the platform hard-rejects two at build time. So when the user asks to personalize by more than one independent field, give each axis its OWN separate slot -- e.g. put the Account-Type variation on greeting_heading and the Region variation on greeting_paragraph -- and make sure the &quot;slots&quot; list actually contains enough distinct text slots (ADD more heading/paragraph slots if you have more axes than slots) so that no single slot key appears in the appliesToSlots of two different-field personalizations. (Multiple decisions of the SAME axis -- e.g. several industry values on the one industry field -- DO all share the same slot; that is one axis and is correct.)
 
 Hard rules:
 1. NEVER write final body copy, button text, subject line text, or preheader text -- only goals/descriptions of what they should accomplish. A separate step writes the actual words.
 2. If the user&apos;s request implies personalization by some field (e.g. &quot;vary by industry&quot;) and a matching fieldApiName+dmoName exists in Confirmed data-graph fields with a matching scope from the list above, build it as a real personalization entry -- do not skip it and do not fake it. If it genuinely cannot be expressed with the fields/rules above, omit it rather than fabricating a fieldApiName or scope.
 3. Every &quot;key&quot; in slots must be unique.
 4. Every personalization&apos;s &quot;appliesToSlots&quot; must reference real slot keys from the slots array.
-5. &quot;scope&quot; must be exactly one of the six named options above -- never a raw DMO/object name, never a path alias name, never invented.
-6. Output ONLY the JSON object -- no markdown fences, no commentary before or after it.</content>
+5. No slot key may appear in the appliesToSlots of two personalizations that use DIFFERENT fields. One independent axis per slot -- give each different-field axis its own distinct slot, adding slots if needed (see the ONE AXIS PER SLOT rule above).
+6. &quot;scope&quot; must be exactly one of the six named options above -- never a raw DMO/object name, never a path alias name, never invented.
+7. Output ONLY the JSON object -- no markdown fences, no commentary before or after it.</content>
         <inputs>
             <apiName>UserIntent</apiName>
             <definition>primitive://String</definition>
@@ -111,9 +122,9 @@ Hard rules:
             <required>false</required>
         </inputs>
         <isCitationEnabled>false</isCitationEnabled>
-        <primaryModel>sfdc_ai__DefaultOpenAIGPT4OmniMini</primaryModel>
+        <primaryModel>sfdc_ai__DefaultOpenAIGPT4Omni</primaryModel>
         <status>Published</status>
-        <versionIdentifier>JwgBFPm6fydyS7dWeQidExYODRMOIfZT+SmdI4qJZUY=_5</versionIdentifier>
+        <versionIdentifier>JwgBFPm6fydyS7dWeQidExYODRMOIfZT+SmdI4qJZUY=_16</versionIdentifier>
     </templateVersions>
     <type>einstein_gpt__flex</type>
     <visibility>Global</visibility>

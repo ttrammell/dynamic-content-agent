@@ -15,6 +15,18 @@ public with sharing class DataGraphDetailsAction {
         @InvocableVariable(label='Resolved Data Graph API Name')
         public String resolvedGraphApiName;
 
+        // Populated on failure only (fieldsJson empty) -- lets the caller branch on a NUMBER
+        // instead of parsing errorMessage text. Confirmed live: a checklist branch written as
+        // "if errorMessage is empty" for the zero-graph case was actually unreachable, since
+        // errorMessage is always non-empty on failure. graphCount=0 means zero graphs
+        // configured (build plain); graphCount>1 means ambiguous (ask user, see
+        // availableGraphNamesJson).
+        @InvocableVariable(label='Graph Count')
+        public Integer graphCount;
+
+        @InvocableVariable(label='Available Graph Names JSON')
+        public String availableGraphNamesJson;
+
         @InvocableVariable(label='Error Message')
         public String errorMessage;
     }
@@ -64,7 +76,11 @@ public with sharing class DataGraphDetailsAction {
         }
     }
 
-    public class NoGraphFoundException extends Exception {}
+    // Carries the actually-available graph list so the caller can report a structured count/
+    // list without a second listDataGraphApiNames callout in the catch block.
+    public class NoGraphFoundException extends Exception {
+        public List<String> availableNames = new List<String>();
+    }
 
     // The Data Cloud Connect API's data-graphs endpoint is get-by-name only -- it has no
     // "list" operation. Every org can (and does) use a different developer name for its data
@@ -124,11 +140,48 @@ public with sharing class DataGraphDetailsAction {
         if (available.size() == 1) {
             return available[0];
         }
+        // Multiple graphs: deterministically pick the RICHEST (most fields) rather than throwing
+        // "specify one". Confirmed live: an org can carry a near-empty graph (e.g. HP_Default, 1
+        // field) alongside the real personalization graph (Real_Time_Data_Graph, 146). Throwing
+        // left the session with NO field catalog, so the plan step flew blind and personalization
+        // silently dropped to a plain email. The graph with the most fields is the unambiguous
+        // choice; whichever wins is surfaced to the user in the plan summary (the data graph is
+        // named there), and a user can still override by naming a specific graph.
+        String richest = null;
+        Integer richestCount = -1;
+        for (String name : available) {
+            Integer c = graphFieldCount(accessToken, name);
+            if (c > richestCount) { richestCount = c; richest = name; }
+        }
+        if (richest != null && richestCount > 0) {
+            return richest;
+        }
+        // Couldn't fetch any / all empty -- genuinely unresolvable; surface the list to ask.
         String requestedNote = String.isNotBlank(requestedName)
             ? ('"' + requestedName + '" was not found. ')
             : '';
-        throw new NoGraphFoundException(requestedNote + 'This org has ' + available.size()
+        NoGraphFoundException ambiguous = new NoGraphFoundException(requestedNote + 'This org has ' + available.size()
             + ' data graphs -- specify one: ' + String.join(available, ', '));
+        ambiguous.availableNames = available;
+        throw ambiguous;
+    }
+
+    // Flattened field count for a graph (0 on any failure) -- used only to auto-pick the richest
+    // graph when several exist, so the common "one real graph + one stub graph" org resolves
+    // cleanly instead of blocking.
+    private static Integer graphFieldCount(String accessToken, String graphApiName) {
+        try {
+            HttpResponse r = fetchGraph(accessToken, graphApiName);
+            if (r.getStatusCode() != 200) { return 0; }
+            Map<String, Object> body = (Map<String, Object>) JSON.deserializeUntyped(r.getBody());
+            Object so = body.get('sourceObject');
+            if (!(so instanceof Map<String, Object>)) { return 0; }
+            List<Object> fields = new List<Object>();
+            collectFields((Map<String, Object>) so, fields, new Set<String>());
+            return fields.size();
+        } catch (Exception e) {
+            return 0;
+        }
     }
 
     @InvocableMethod(label='Get Data Graph Details' description='Fetches a Data Cloud data graph\'s full field topology -- the primary object plus every related object, flattened into one list grouped by DMO -- via the Data Cloud Connect API. Includes fields beyond plain identity/personalization fields (e.g. Case status, engagement data) that are useful for dynamic-content decisions. Auto-detects the org\'s data graph if none is specified.')
@@ -136,6 +189,16 @@ public with sharing class DataGraphDetailsAction {
         List<Result> results = new List<Result>();
         for (Request req : requests) {
             Result res = new Result();
+            // Confirmed live: a null String output binds to a null agent-script variable, not
+            // an empty string -- and Salesforce's own LLM gateway hard-rejects ANY prompt
+            // template call where an input resolves to null ("[UndefinedResolutionError]
+            // incorrect input param... all elements are null"), breaking plan_email_structure_
+            // action/write_email_copy_action entirely, every single time, in any org with more
+            // than one data graph (the ambiguous-graph failure path never used to set
+            // fieldsJson at all). Default every string output to a safe empty value up front so
+            // no exception path can ever leave one null.
+            res.fieldsJson = '[]';
+            res.availableGraphNamesJson = '[]';
             try {
                 String accessToken = tokenSource.getAccessToken();
                 String graphApiName = resolveGraphApiName(accessToken, req.graphApiName);
@@ -149,10 +212,19 @@ public with sharing class DataGraphDetailsAction {
                     res.success = true;
                     res.resolvedGraphApiName = graphApiName;
                     res.fieldsJson = JSON.serialize(fields);
+                    // Semantically "resolved unambiguously", not literally "org has exactly one
+                    // graph" -- callers branch on this number, so it must never be left null on
+                    // the success path (a null @outputs.graphCount would bind to nothing).
+                    res.graphCount = 1;
                 } else {
                     res.success = false;
                     res.errorMessage = 'HTTP ' + httpRes.getStatusCode() + ': ' + httpRes.getBody();
                 }
+            } catch (NoGraphFoundException nfe) {
+                res.success = false;
+                res.errorMessage = nfe.getMessage();
+                res.graphCount = nfe.availableNames.size();
+                res.availableGraphNamesJson = JSON.serialize(nfe.availableNames);
             } catch (Exception e) {
                 res.success = false;
                 res.errorMessage = e.getMessage();

@@ -23,10 +23,10 @@ Before deploying to a brand-new org, open `aiAuthoringBundles/Dynamic_Content_Ag
 ## What gets deployed
 
 - The agent's Agent Script bundle (`AiAuthoringBundle`)
-- 2 GenAI prompt templates, bound **natively** as agent actions (not called from Apex): `AuraPoc_PlanEmailStructureV2`, `AuraPoc_WriteEmailCopy`
-- 10 Apex classes: 6 agent actions (`FindBrandAssetsAction`, `FindBrandRecordAction`, `DataGraphDetailsAction`, `AssembleContentPlanAction`, `ValidateContentPlanAction`, `BuildDynamicEmailAction`) plus 4 shared utility/auth classes (`AuraPocTokenProvider`, `AuraPocTokenSource`, `AuraServiceClient`, `AuraSessionMinter`)
+- 2 GenAI prompt templates: `AuraPoc_PlanEmailStructureV2` (bound **natively** as an agent action — structure planning only, no Apex mediation) and `AuraPoc_FillSlot` (called from Apex by `FillCopyAction`, one narrow LLM call per copy cell — not agent-bound directly)
+- 13 Apex classes: 9 agent actions (`FindBrandAssetsAction`, `FindBrandRecordAction`, `DataGraphDetailsAction`, `ResolveBrandingAction`, `AssembleContentPlanAction`, `FillCopyAction`, `ValidateContentPlanAction`, `BuildDynamicEmailAction`, `ConfirmBuildAction`) plus 4 shared utility/auth classes (`AuraPocTokenProvider`, `AuraPocTokenSource`, `AuraServiceClient`, `AuraSessionMinter`)
 
-  As of this refactor, planning and copywriting are handled by direct native prompt-template bindings in the agent script itself, not Apex-mediated calls — the earlier `PlanEmailStructureAction`/`WriteEmailCopyAction`/`NativePromptTemplateProvider`/`LlmCompletionProvider` classes are gone from this package because nothing calls them anymore.
+  Structure planning stays a direct native prompt-template binding in the agent script. Copywriting changed: the old monolithic `AuraPoc_WriteEmailCopy` step (one LLM call asked to emit an entire copy matrix in one JSON blob) was replaced by `FillCopyAction`, which drives a deterministic per-cell loop in Apex and makes one narrow LLM call per cell via `AuraPoc_FillSlot` — the model never sees rules, slot keys, or JSON shape, only one element's text at a time. Fixes a copy-coverage-gap failure class where the old single-call approach was repeatedly under-filling the matrix.
 - The `AuraPoc_Config__mdt` custom metadata type (its **type only** — the `Default` record ships with placeholder values you must fill in, see Step 4 below)
 - A fresh self-signed `AuraPoc_JwtCert` certificate — Salesforce generates a brand-new private key for whichever org you deploy into; nothing is copied from anywhere
 - A base `AuraPoc_JwtApp` External Client App record (name/label only — its OAuth/JWT settings are not deployable metadata, see Step 2)

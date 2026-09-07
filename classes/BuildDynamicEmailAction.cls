@@ -93,6 +93,17 @@ public with sharing class BuildDynamicEmailAction {
 
         @InvocableVariable(label='Data Graph Name')
         public String profileDataGraphName;
+
+        // Display-only inputs -- surfaced on the require_user_confirmation dialog for the
+        // user's final review; NOT used by the build logic (intentionally ignored).
+        @InvocableVariable(label='Personalization')
+        public String personalizationSummary;
+
+        @InvocableVariable(label='Validation')
+        public String validationSummary;
+
+        @InvocableVariable(label='Branding')
+        public String brandingSummary;
     }
 
     public class Result {
@@ -129,9 +140,11 @@ public with sharing class BuildDynamicEmailAction {
     public class ElementException extends Exception {}
     public class WireException extends Exception {}
 
-    // Matches the marketing toolkit's own silent install caps (project_dc_topology_caps) --
-    // a PP binds to one sourceRecordId, so multi-axis personalization needs multiple PPs.
-    public static final Integer MAX_PPS_PER_EMAIL = 3;
+    // Raised from 3 (the marketing toolkit's own silent install cap) after live scale-testing
+    // showed the real per-PP cost is ~1 callout / ~15-30ms CPU -- nowhere near the platform's
+    // actual ceilings (100 callouts, 10000ms CPU per transaction). 20 is a generous sanity rail
+    // against a truly runaway request, not a technical necessity -- see scale test results.
+    public static final Integer MAX_PPS_PER_EMAIL = 20;
     public static final Integer MAX_DECISIONS_PER_PP = 10;
 
     @TestVisible
@@ -560,6 +573,16 @@ public with sharing class BuildDynamicEmailAction {
             },
             'imageInfo' => new Map<String, Object>{
                 'source' => new Map<String, Object>{
+                    // ref MUST be the object form {"contentKey": "MC..."}, matching the marketing
+                    // toolkit's proven _img_block helper (web/app.py) and the native CMS email
+                    // builder's own output (verified live: every image ref in a natively-authored
+                    // email in this org is source.ref.contentKey, not a bare string). A bare
+                    // string ref still RENDERS (the /cms/media url resolves) so the earlier
+                    // "confirmed live 400" note was a misdiagnosis -- but the builder can't link a
+                    // bare-string ref back to its ManagedContent record, so the image shows yet is
+                    // NOT selectable/replaceable in the email builder (the exact symptom this
+                    // fixes). lightning:brandSource elsewhere is a different attribute that also
+                    // happens to take {"contentKey": ...}.
                     'ref' => new Map<String, Object>{ 'contentKey' => contentKey },
                     'type' => 'imageReference'
                 },
@@ -567,7 +590,11 @@ public with sharing class BuildDynamicEmailAction {
                 'altText' => altText
             },
             'lightning:horizontalAlignment' => 'center',
-            'lightning:padding' => padding
+            // Images space with lightning:margin, NOT lightning:padding -- matches the marketing
+            // toolkit's proven _img_block helper (web/app.py) and the native builder. Padding on an
+            // image block reads as the "extra styling" that made the agent's logo look off vs a
+            // normally-authored one; margin is the correct property for image breathing room.
+            'lightning:margin' => padding
         };
     }
 
@@ -600,9 +627,35 @@ public with sharing class BuildDynamicEmailAction {
             'attributes' => new Map<String, Object>{
                 'align' => 'left',
                 'text' => text,
+                // Confirmed live: headingBlock() and the footer paragraphs both set
+                // lightning:typography to a named brand token, but this main-body paragraph
+                // builder never did -- CMS Builder shows "Custom" style instead of inheriting
+                // the brand's paragraph typography when this attribute is absent.
+                'lightning:typography' => '{!$brand.typography.paragraph.paragraph1}',
                 'lightning:padding' => paddingMap(16.0, 24.0, 24.0, 24.0)
             }
         };
+    }
+
+    // Deterministic guard, not a prompt instruction: confirmed live that Write Email Copy's
+    // "never invent a plausible-looking fake URL" rule doesn't always hold -- it sometimes
+    // fabricates a real-looking slug (e.g. "amd-event-details") despite the pre-approval
+    // summary correctly showing the real fallback. A prompt rule can't be trusted for something
+    // with a real consequence (CMS 400s on an invalid URL); force it here instead. A bare "#"
+    // anchor also confirmed live to fail this org's URL-format validation on the button action,
+    // so the safe fallback must be a real, trusted, absolute URL -- example.com is added to
+    // this org's Trusted URLs (CspTrustedSite AuraPoc_Example_Placeholder) for exactly this.
+    private static final String SAFE_FALLBACK_URL = 'https://www.example.com';
+
+    private static String sanitizeUrl(String url) {
+        if (String.isBlank(url) || url == 'null') {
+            return SAFE_FALLBACK_URL;
+        }
+        String trimmed = url.trim();
+        if (trimmed.toLowerCase().startsWith('http://') || trimmed.toLowerCase().startsWith('https://')) {
+            return trimmed;
+        }
+        return SAFE_FALLBACK_URL;
     }
 
     private static Map<String, Object> buttonBlock(String id, String text, String url) {
@@ -645,12 +698,98 @@ public with sharing class BuildDynamicEmailAction {
         } else if (type == 'paragraph') {
             return paragraphBlock(id, sanitizeText(String.valueOf(el.get('text'))));
         } else if (type == 'image') {
-            return imageBlock(id, String.valueOf(el.get('contentKey')), sanitizeText(String.valueOf(el.get('altText'))), asDecimal(el.get('widthPercent'), 100.0));
+            // el.get('contentKey') is Apex null (not the string "null") when the key is
+            // missing entirely -- confirmed live this NPEs Pattern.matches below instead of
+            // reaching the clear "invalid contentKey" message. Normalize to '' first.
+            String imgContentKey = String.isNotBlank(String.valueOf(el.get('contentKey')))
+                ? String.valueOf(el.get('contentKey')) : '';
+            // Deterministic guard, not a prompt instruction: confirmed live that the LLM can
+            // fabricate an image contentKey from unrelated context text (e.g. it once used the
+            // literal data-graph name "Real_Time_Data_Graph" as a "contentKey", producing a
+            // confusing generic CMS error instead of failing loud with the real problem). Real
+            // CMS contentKeys always look like "MC" + alphanumerics -- fail loud and clearly if
+            // this doesn't, rather than letting CMS reject it with an unhelpful error later.
+            if (!Pattern.matches('^MC[A-Za-z0-9]{2,60}$', imgContentKey)) {
+                throw new ElementException('Image element "' + String.valueOf(el.get('key'))
+                    + '" has an invalid contentKey ("' + imgContentKey + '") -- this must be a '
+                    + 'real CMS contentKey (starts with "MC"), never a data graph name, brand '
+                    + 'name, or other fabricated string. Omit the image slot instead if no real '
+                    + 'asset was found for it.');
+            }
+            return imageBlock(id, imgContentKey, sanitizeText(String.valueOf(el.get('altText'))), asDecimal(el.get('widthPercent'), 100.0));
         } else if (type == 'button') {
-            return buttonBlock(id, sanitizeText(String.valueOf(el.get('text'))), String.valueOf(el.get('url')));
+            return buttonBlock(id, sanitizeText(String.valueOf(el.get('text'))), sanitizeUrl(String.valueOf(el.get('url'))));
         }
         throw new ElementException('Unsupported element type: ' + type
             + ' (expected heading, paragraph, image, or button)');
+    }
+
+    // ManagedContent.ContentTypeFullyQualifiedName is real and describe-visible but Apex's
+    // native SOQL engine rejects it in both static and dynamic (Database.query) form --
+    // confirmed live in FindBrandAssetsAction. The REST /query endpoint accepts it fine, so
+    // this type lookup goes through a callout rather than a native SOQL WHERE/SELECT.
+    private static Map<String, String> queryContentTypesByKey(String accessToken, Set<String> keys) {
+        Map<String, String> typeByKey = new Map<String, String>();
+        List<String> quoted = new List<String>();
+        for (String k : keys) {
+            quoted.add('\'' + String.escapeSingleQuotes(k) + '\'');
+        }
+        String soql = 'SELECT ManagedContentKey, ManagedContent.ContentTypeFullyQualifiedName '
+            + 'FROM ManagedContentVariant WHERE ManagedContentKey IN (' + String.join(quoted, ',') + ')';
+        HttpRequest queryReq = new HttpRequest();
+        queryReq.setMethod('GET');
+        queryReq.setEndpoint(AuraPocTokenProvider.instanceUrl() + '/services/data/v66.0/query?q=' + EncodingUtil.urlEncode(soql, 'UTF-8'));
+        queryReq.setHeader('Authorization', 'Bearer ' + accessToken);
+        queryReq.setTimeout(30000);
+        HttpResponse queryRes = new Http().send(queryReq);
+        if (queryRes.getStatusCode() != 200) {
+            // Fail open on a lookup/transport error -- an unrelated API hiccup here shouldn't
+            // block a build that the CMS callout itself would otherwise accept. A genuinely
+            // wrong contentKey type is still caught below whenever this lookup does succeed.
+            return typeByKey;
+        }
+        Map<String, Object> parsed = (Map<String, Object>) JSON.deserializeUntyped(queryRes.getBody());
+        for (Object recObj : (List<Object>) parsed.get('records')) {
+            Map<String, Object> rec = (Map<String, Object>) recObj;
+            String key = String.valueOf(rec.get('ManagedContentKey'));
+            Map<String, Object> mc = (Map<String, Object>) rec.get('ManagedContent');
+            String contentType = mc != null ? String.valueOf(mc.get('ContentTypeFullyQualifiedName')) : null;
+            if (String.isNotBlank(key) && String.isNotBlank(contentType)) {
+                typeByKey.put(key, contentType);
+            }
+        }
+        return typeByKey;
+    }
+
+    // Deterministic guard, not a prompt instruction: confirmed live that branding resolution
+    // can hand back a brand RECORD's contentKey (sfdc_cms__brand) where a logo/header/body
+    // image's contentKey (sfdc_cms__image) was expected -- the two are never legitimately
+    // interchangeable, but nothing before this point verifies the TYPE of an image contentKey,
+    // only its shape (see the "MC" prefix check in buildElementBlock). Fed to CMS as-is, this
+    // produces an opaque HTTP 500 "UNKNOWN_EXCEPTION" deep in the CMS renderer instead of a
+    // clear error here.
+    private static void validateImageContentKeys(String accessToken, Set<String> keys) {
+        if (keys.isEmpty()) {
+            return;
+        }
+        Map<String, String> typeByKey = queryContentTypesByKey(accessToken, keys);
+        for (String k : keys) {
+            String actualType = typeByKey.get(k);
+            if (actualType == null) {
+                // Lookup succeeded but this key wasn't found at all (or the lookup itself
+                // failed, in which case typeByKey is empty for every key) -- don't block on a
+                // missing lookup, only on a confirmed wrong type. A truly invalid/deleted
+                // contentKey still surfaces naturally from the CMS create callout itself.
+                continue;
+            }
+            if (actualType != 'sfdc_cms__image') {
+                throw new ElementException('Content key "' + k + '" is a ' + actualType
+                    + ' record, not an image -- it cannot be used as a logo, header, or body '
+                    + 'image. This is almost always a brand-record contentKey (from Find Brand '
+                    + 'Record) mistakenly used where a logo/header/body image contentKey (from '
+                    + 'Find Brand Assets) was expected.');
+            }
+        }
     }
 
     @InvocableMethod(label='Build Dynamic Email' description='Creates an sfdc_cms__email CMS content item from a list of content elements, and optionally wires dynamic content personalization into it, in one atomic call. If personalization is requested but fails, the created email is deleted rather than left half-built.')
@@ -703,6 +842,38 @@ public with sharing class BuildDynamicEmailAction {
                 }
 
                 List<Object> elements = (List<Object>) JSON.deserializeUntyped(req.elementsJson);
+
+                // The equality guard above only catches a brand/logo mixup when the SAME wrong
+                // key is reused in two places -- confirmed live it doesn't help when the wrong
+                // (non-image) key lands in logoContentKeyOverride alone: the CMS create callout
+                // then 500s with an opaque "UNKNOWN_EXCEPTION" instead of a clean validation
+                // error, because lightning:image's imageInfo.source.ref silently accepts any
+                // contentKey shape and only fails deep inside CMS's own renderer. Independently
+                // verify every contentKey that's about to be used as an image (override AND
+                // body elements) is actually an sfdc_cms__image record before the callout.
+                Set<String> imageKeysToValidate = new Set<String>();
+                if (String.isNotBlank(req.logoContentKeyOverride)) {
+                    imageKeysToValidate.add(req.logoContentKeyOverride);
+                }
+                if (String.isNotBlank(req.headerContentKeyOverride)) {
+                    imageKeysToValidate.add(req.headerContentKeyOverride);
+                }
+                for (Object elObj : elements) {
+                    Map<String, Object> el = (Map<String, Object>) elObj;
+                    if (String.valueOf(el.get('type')) == 'image') {
+                        String elContentKey = String.valueOf(el.get('contentKey'));
+                        // A missing/blank contentKey here is a real problem, but it's
+                        // buildElementBlock's job to fail loud on it with a clear message --
+                        // String.valueOf(null) is Apex null, not "null", so Pattern.matches
+                        // against it throws an unhelpful NPE instead. Only validate the type of
+                        // keys that are actually present and shaped like a contentKey.
+                        if (String.isNotBlank(elContentKey) && Pattern.matches('^MC[A-Za-z0-9]{2,60}$', elContentKey)) {
+                            imageKeysToValidate.add(elContentKey);
+                        }
+                    }
+                }
+                validateImageContentKeys(accessToken, imageKeysToValidate);
+
                 Map<String, Object> blockIds = new Map<String, Object>();
                 Map<String, Object> expressionsByKey = new Map<String, Object>();
                 Boolean bodyBranding = req.includeBranding == null ? true : req.includeBranding;
@@ -765,7 +936,7 @@ public with sharing class BuildDynamicEmailAction {
                     Map<String, Object> logoColumn = new Map<String, Object>{
                         'id' => newBlockId(), 'definition' => 'lightning/column', 'type' => 'block',
                         'attributes' => columnAttrs(12.0),
-                        'children' => new List<Object>{ imageBlock(newBlockId(), logoKey, 'Company logo', 20.0, paddingMap(8.0, 8.0, 8.0, 8.0)) }
+                        'children' => new List<Object>{ imageBlock(newBlockId(), logoKey, 'Company logo', 45.0, paddingMap(32.0, 16.0, 16.0, 16.0)) }
                     };
                     topLevelSections.add(new Map<String, Object>{
                         'id' => newBlockId(), 'definition' => 'lightning/section', 'type' => 'block',
@@ -777,7 +948,7 @@ public with sharing class BuildDynamicEmailAction {
                     Map<String, Object> headerColumn = new Map<String, Object>{
                         'id' => newBlockId(), 'definition' => 'lightning/column', 'type' => 'block',
                         'attributes' => columnAttrs(12.0),
-                        'children' => new List<Object>{ imageBlock(newBlockId(), headerKey, 'Header banner', 100.0, paddingMap(16.0, 16.0, 0.0, 0.0)) }
+                        'children' => new List<Object>{ imageBlock(newBlockId(), headerKey, 'Header banner', 100.0, paddingMap(0.0, 0.0, 16.0, 16.0)) }
                     };
                     topLevelSections.add(new Map<String, Object>{
                         'id' => newBlockId(), 'definition' => 'lightning/section', 'type' => 'block',
@@ -847,8 +1018,19 @@ public with sharing class BuildDynamicEmailAction {
                     'sfdc_cms:operations' => new List<Object>(),
                     'sfdc_cms:variants' => new List<Object>()
                 };
+                // Confirmed live: the CMS Connect API's contents-create endpoint 400s with
+                // "Length of actual parameter component exceeds declared length of object
+                // component (18 vs 15)" when given the modern 18-char case-insensitive
+                // ManagedContentSpace Id -- REST /query always returns the 18-char form, but
+                // this specific endpoint wants the legacy 15-char case-sensitive form. Safe to
+                // truncate: the first 15 chars ARE the real id, the trailing 3 are only a
+                // case-insensitivity checksum. See [[feedback_sf_id_15_vs_18]].
+                String spaceOrFolderId = req.contentSpaceOrFolderId;
+                if (spaceOrFolderId != null && spaceOrFolderId.length() == 18) {
+                    spaceOrFolderId = spaceOrFolderId.substring(0, 15);
+                }
                 Map<String, Object> createPayload = new Map<String, Object>{
-                    'contentSpaceOrFolderId' => req.contentSpaceOrFolderId,
+                    'contentSpaceOrFolderId' => spaceOrFolderId,
                     'title' => decodedTitle,
                     'urlName' => req.urlName,
                     'contentType' => 'sfdc_cms__email',
@@ -993,6 +1175,73 @@ public with sharing class BuildDynamicEmailAction {
         List<Object> allVariantIdEntries = new List<Object>();
         List<String> createdPpNames = new List<String>();
 
+        // Confirmed live: a plan with two PersonalizationPoints that both target the same
+        // block (e.g. persona + tier "combination" copy on one paragraph) creates both PPs
+        // successfully, then fails the final variant PUT with "duplicate targetId in the
+        // operations array" -- CMS allows only one operation per block. Without this
+        // try/catch, that failure rolled back the email (via the caller's deleteContent) but
+        // left the two already-created PersonalizationPoint/PersonalizationDecision records
+        // permanently orphaned in the org (SourceRecordId null, never wired to anything).
+        // Wrap the whole build+wire loop so any failure cleans up every PP created so far.
+        try {
+            wirePersonalizationsInner(ppSpecs, sess, auraContextJson, expressionsByKey, blockIds,
+                dataSpace, graphName, managedContentId, allOperations, allVariants, allVariantIdEntries, createdPpNames);
+
+            contentBody.put('lightning:dataProviders', new List<Object>{ dataGraphDataProvider(graphName, dataSpace) });
+            contentBody.put('sfdc_cms:operations', allOperations);
+            contentBody.put('sfdc_cms:variants', allVariants);
+            contentBody.put('lightning:expressions', new List<Object>(expressionsByKey.values()));
+
+            HttpRequest putReq = new HttpRequest();
+            putReq.setMethod('PUT');
+            putReq.setEndpoint(AuraPocTokenProvider.instanceUrl() + '/services/data/v66.0/connect/cms/contents/variants/' + variantRecordId);
+            putReq.setHeader('Content-Type', 'application/json');
+            putReq.setHeader('Authorization', 'Bearer ' + accessToken);
+            putReq.setBody(JSON.serialize(new Map<String, Object>{ 'contentBody' => contentBody }));
+            putReq.setTimeout(30000);
+            HttpResponse putRes = new Http().send(putReq);
+
+            if (putRes.getStatusCode() != 200 && putRes.getStatusCode() != 204) {
+                throw new WireException('Variant PUT failed: HTTP ' + putRes.getStatusCode() + ': ' + putRes.getBody());
+            }
+        } catch (Exception e) {
+            for (String ppNameToClean : createdPpNames) {
+                deletePersonalizationPointBestEffort(sess, auraContextJson, ppNameToClean);
+            }
+            throw e;
+        }
+
+        res.personalized = true;
+        res.ppName = JSON.serialize(createdPpNames);
+        res.variantIdsJson = JSON.serialize(allVariantIdEntries);
+    }
+
+    // Best-effort PersonalizationPoint delete, reusing the caller's already-minted Aura
+    // session -- confirmed live via PersonalizationServiceController.deletePersonalizationPoint
+    // ({"idOrName": <name or id>}), same controller/session pattern as deleteContent() below
+    // uses for ManagedContentController. Never throws -- called only from rollback paths that
+    // must not mask the original failure with a secondary cleanup error.
+    private static Boolean deletePersonalizationPointBestEffort(AuraSessionMinter.Session sess, String auraContextJson, String ppName) {
+        try {
+            AuraServiceClient.CallResult delResult = AuraServiceClient.callAction(
+                sess,
+                'aura://PersonalizationServiceController/ACTION$deletePersonalizationPoint',
+                'aura.PersonalizationService.deletePersonalizationPoint',
+                auraContextJson, '/cmsAuthor/contentEditor.app', 1,
+                new Map<String, Object>{ 'idOrName' => ppName }
+            );
+            return delResult.state == AuraServiceClient.CallState.SUCCESS;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    // Original per-ppSpec build+create loop, unchanged in behavior -- extracted verbatim into
+    // its own method so wirePersonalizations can wrap it in the try/catch above without
+    // duplicating the loop body.
+    private static void wirePersonalizationsInner(List<Object> ppSpecs, AuraSessionMinter.Session sess, String auraContextJson,
+            Map<String, Object> expressionsByKey, Map<String, Object> blockIds, String dataSpace, String graphName, String managedContentId,
+            List<Object> allOperations, List<Object> allVariants, List<Object> allVariantIdEntries, List<String> createdPpNames) {
         for (Object ppSpecObj : ppSpecs) {
             Map<String, Object> ppSpec = (Map<String, Object>) ppSpecObj;
             String rawPpName = String.valueOf(ppSpec.get('ppName'));
@@ -1120,28 +1369,6 @@ public with sharing class BuildDynamicEmailAction {
                 });
             }
         }
-
-        contentBody.put('lightning:dataProviders', new List<Object>{ dataGraphDataProvider(graphName, dataSpace) });
-        contentBody.put('sfdc_cms:operations', allOperations);
-        contentBody.put('sfdc_cms:variants', allVariants);
-        contentBody.put('lightning:expressions', new List<Object>(expressionsByKey.values()));
-
-        HttpRequest putReq = new HttpRequest();
-        putReq.setMethod('PUT');
-        putReq.setEndpoint(AuraPocTokenProvider.instanceUrl() + '/services/data/v66.0/connect/cms/contents/variants/' + variantRecordId);
-        putReq.setHeader('Content-Type', 'application/json');
-        putReq.setHeader('Authorization', 'Bearer ' + accessToken);
-        putReq.setBody(JSON.serialize(new Map<String, Object>{ 'contentBody' => contentBody }));
-        putReq.setTimeout(30000);
-        HttpResponse putRes = new Http().send(putReq);
-
-        if (putRes.getStatusCode() != 200 && putRes.getStatusCode() != 204) {
-            throw new WireException('Variant PUT failed: HTTP ' + putRes.getStatusCode() + ': ' + putRes.getBody());
-        }
-
-        res.personalized = true;
-        res.ppName = JSON.serialize(createdPpNames);
-        res.variantIdsJson = JSON.serialize(allVariantIdEntries);
     }
 
     // CMS content has no REST delete -- confirmed live (405 Method Not Allowed). The only

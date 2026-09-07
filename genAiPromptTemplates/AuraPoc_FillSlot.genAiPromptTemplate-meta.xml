@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<GenAiPromptTemplate xmlns="http://soap.sforce.com/2006/04/metadata">
+    <activeVersionIdentifier>AuraPocFillSlot_3</activeVersionIdentifier>
+    <developerName>AuraPoc_FillSlot</developerName>
+    <masterLabel>AuraPoc: Fill Slot</masterLabel>
+    <overridable>false</overridable>
+    <templateVersions>
+        <content>You are a marketing email copywriter. Write ONLY the text for one single email element. Return just the element text -- no surrounding quotes, no JSON, no labels, no markdown, no explanation.
+
+LANGUAGE (HIGHEST PRIORITY): If the Element spec or the Audience below tells you to write this element in a specific language (e.g. Japanese, French, Spanish), then the ENTIRE element MUST be in that language -- every single word. Do NOT include ANY English -- no English sentences, no English phrases, no half-and-half. The ONLY thing kept unchanged is a {{merge token}} such as {{FirstName}} (leave those verbatim, never translate a token). Before you answer, re-read your output and confirm it is 100% in the requested language. If no language is specified, write in natural English.
+
+NEVER REFUSE: Always produce finished element copy. NEVER output &quot;I don&apos;t know&quot;, &quot;I&apos;m sorry&quot;, &quot;I cannot&quot;, a question back to me, an apology, an empty response, or any meta-comment. If details are thin, write your best natural copy anyway, in the required language.
+
+Element spec (its type and target length): {!$Input:SlotSpec}
+What this element should accomplish: {!$Input:SlotGoal}
+Email theme and overall context: {!$Input:Theme}
+Brand voice to write in (if this is &quot;None available&quot;, use a neutral, professional tone): {!$Input:BrandVoice}
+Audience for THIS version of the element: {!$Input:RuleCase}
+
+Write the element now, in the required language. Match the element spec (both its type and its target length), follow the brand voice, and tailor the wording to the described audience. If the audience is a generic/default case, write copy that reads naturally for everyone. Output only the element text, nothing else.
+
+Additional rules:
+1. MERGE TOKENS: if the audience description tells you to address the recipient by a personal value using a token like {{FirstName}}, {{LastName}}, or {{AccountName}}, you MUST write that EXACT token verbatim (double braces, exact spelling) at the spot where the value belongs -- e.g. &quot;Hi {{FirstName}},&quot;. NEVER leave that spot blank or write a bare/empty greeting like &quot;Dear ,&quot; -- the token IS the value and is required.
+2. MEANINGFUL CONTRAST: when the audience is a specific segment (an industry, region, tier, persona, etc.), make this copy MEANINGFULLY different from a generic version and from other segments -- lead with what actually matters to THIS segment and use concrete, segment-specific language. Do not just swap a single word.
+3. NO PLACEHOLDERS: never output bracketed placeholders like [insert date], [date/time], or [location]. If a specific detail was not provided, write naturally without it -- never invent a fill-in-the-blank.
+4. LANGUAGE PURITY: when a language is specified (in the Element spec or Audience), the finished output must be 100% in that language (merge tokens excepted). If it is Japanese, write natural Japanese; if French, natural French; etc. Zero English leakage when the required language is not English.</content>
+        <inputs>
+            <apiName>Theme</apiName>
+            <definition>primitive://String</definition>
+            <referenceName>Input:Theme</referenceName>
+            <required>false</required>
+        </inputs>
+        <inputs>
+            <apiName>BrandVoice</apiName>
+            <definition>primitive://String</definition>
+            <referenceName>Input:BrandVoice</referenceName>
+            <required>false</required>
+        </inputs>
+        <inputs>
+            <apiName>SlotSpec</apiName>
+            <definition>primitive://String</definition>
+            <referenceName>Input:SlotSpec</referenceName>
+            <required>false</required>
+        </inputs>
+        <inputs>
+            <apiName>SlotGoal</apiName>
+            <definition>primitive://String</definition>
+            <referenceName>Input:SlotGoal</referenceName>
+            <required>false</required>
+        </inputs>
+        <inputs>
+            <apiName>RuleCase</apiName>
+            <definition>primitive://String</definition>
+            <referenceName>Input:RuleCase</referenceName>
+            <required>false</required>
+        </inputs>
+        <isCitationEnabled>false</isCitationEnabled>
+        <primaryModel>sfdc_ai__DefaultOpenAIGPT4OmniMini</primaryModel>
+        <status>Published</status>
+        <versionIdentifier>AuraPocFillSlot_3</versionIdentifier>
+    </templateVersions>
+    <type>einstein_gpt__flex</type>
+    <visibility>Global</visibility>
+</GenAiPromptTemplate>

@@ -2,6 +2,6 @@
 <AiAuthoringBundle xmlns="http://soap.sforce.com/2006/04/metadata">
     <bundleType>AGENT</bundleType>
     <target></target>
-    <versionDescription>Confirmed live: agent kept re-calling get_data_graph_details_tool blank instead of asking the user which graph, looping forever. Now stops after one ambiguous result, asks, waits, retries once with the answer.</versionDescription>
-    <versionTag>v26-stop-datagraph-retry-loop</versionTag>
+    <versionDescription>Dynamic content email builder: plans, personalizes, and builds Salesforce CMS emails from a data graph, with deterministic brand/asset resolution and a confirmation step before build.</versionDescription>
+    <versionTag>1.0</versionTag>
 </AiAuthoringBundle>

@@ -16,6 +16,15 @@ public with sharing class FindBrandRecordAction {
 
         @InvocableVariable(label='Max Results')
         public Integer maxResults;
+
+        // Confirmed live: fetching voice for every matched brand does one HTTP callout PER
+        // brand -- fine for a targeted 1-3 match search, but a full-org catalog fetch (e.g.
+        // 28 brands) turned into 28 sequential callouts and blew past the agent platform's
+        // per-turn time budget, surfacing as a generic "unexpected error" with no real detail.
+        // Default true (unchanged behavior) -- pass false explicitly for a cheap, voice-less
+        // bulk listing.
+        @InvocableVariable(label='Include Voice')
+        public Boolean includeVoice;
     }
 
     public class Result {
@@ -88,11 +97,19 @@ public with sharing class FindBrandRecordAction {
         List<Result> results = new List<Result>();
         for (Request req : requests) {
             Result res = new Result();
+            // Confirmed live (DataGraphDetailsAction had the same gap): a null String output
+            // binds to a null agent-script variable, and Salesforce's LLM gateway hard-rejects
+            // any prompt template call with a null input. Default before the try so no
+            // exception path can leave this null.
+            res.brandsJson = '[]';
             try {
-                Integer lim = req.maxResults != null ? req.maxResults : 10;
+                // Same fix as FindBrandAssetsAction: no ORDER BY meant row order was
+                // unspecified, which could silently drop a real match beyond maxResults.
+                Integer lim = req.maxResults != null ? req.maxResults : 25;
                 String pattern = '%' + (String.isBlank(req.searchTerm) ? '' : String.escapeSingleQuotes(req.searchTerm)) + '%';
                 String soql = 'SELECT Id, Name, AuthoredManagedContentSpaceId FROM ManagedContent '
                     + 'WHERE ContentTypeFullyQualifiedName = \'sfdc_cms__brand\' AND Name LIKE \'' + pattern + '\' '
+                    + 'ORDER BY Name ASC '
                     + 'LIMIT ' + lim;
 
                 HttpRequest queryReq = new HttpRequest();
@@ -147,7 +164,9 @@ public with sharing class FindBrandRecordAction {
                     if (v == null) {
                         continue;
                     }
-                    Map<String, String> voice = fetchBrandVoice(v.ManagedContentKey);
+                    Map<String, String> voice = (req.includeVoice == false)
+                        ? new Map<String, String>{ 'description' => '', 'identity' => '', 'tone' => '' }
+                        : fetchBrandVoice(v.ManagedContentKey);
                     brands.add(new Map<String, Object>{
                         'name' => nameByContentId.get(contentId),
                         'contentKey' => v.ManagedContentKey,
