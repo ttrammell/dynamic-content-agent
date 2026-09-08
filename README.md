@@ -6,7 +6,7 @@ An Agentforce agent (`Dynamic_Content_Agent_v3`) that builds CMS emails from con
 
 [Deploy this package to Salesforce](#) *(link filled in once the deploy tool is live)*
 
-Click the link, log into your target org, and deploy. That covers the metadata only (the agent, its Apex actions, prompt templates, a fresh certificate, and a base External Client App record) — four more manual steps are required afterward and can't be automated by any link, on any platform, by design (Salesforce doesn't allow OAuth app authorization to be scripted). See "Manual setup after deploying" below.
+Click the link, log into your target org, and deploy. That covers the metadata only (the agent, its Apex actions, prompt templates, a fresh certificate, and a base External Client App record) — five more manual steps are required afterward and can't be automated by any link, on any platform, by design (Salesforce doesn't allow OAuth app authorization to be scripted). See "Manual setup after deploying" below.
 
 ## Install via CLI instead
 
@@ -44,9 +44,9 @@ The agent's Apex actions authenticate back into the org itself using a JWT Beare
 3. **Callback URL**: any syntactically valid HTTPS URL works — JWT Bearer flow never actually redirects to it. Use `https://<your-domain>.my.salesforce.com/services/oauth2/callback`
 4. **OAuth Scopes** — add:
    - `Manage user data via APIs (api)`
-   - a Data Cloud scope (`cdp_api` if offered as a general scope; otherwise `cdp_query_api`)
+   - `Full access (full)` — **required, do not skip.** Confirmed live: an `api`-only token mints fine and simple builds even succeed, but the Build action's Personalization Point wiring step needs a real browser-capable Lightning session, not just an API token. Without `full`, `frontdoor.jsp` bounces the token back to itself (`ec=302`, no session cookie set) instead of promoting a session — this surfaces as the agent stalling after you approve a build plan, then eventually reporting something like "Build failed: Personalization failed AND rollback delete also failed." Reproduced side by side: `api`+Data Cloud+`refresh_token` alone reproduces the bounce every time; adding `full` clears it.
+   - a Data Cloud scope (`cdp_api` if offered as a general scope; otherwise `cdp_query_api` or `cdp_profile_api`, whichever your org exposes)
    - `Perform requests on your behalf at any time (refresh_token, offline_access)` — **required**, even though this flow never actually returns or uses a refresh token. Omitting it is the single most common reason this setup fails on first test (`invalid_request: refresh_token scope is required...`)
-   - Skip `full` — unnecessarily broad
 5. Check **Enable JWT Bearer Flow**
 6. **Certificate**: select the existing **AuraPoc_JwtCert** from the picker (already exists from the deploy — do not upload a new file)
 7. Leave **"Issue JSON Web Token (JWT)-based access tokens for named users"** unchecked — unrelated setting, controls token *format*, not whether JWT Bearer auth works
@@ -70,9 +70,22 @@ The agent's Apex actions authenticate back into the org itself using a JWT Beare
 
 **Never copy these four values from another org.** Every value is org-specific — pasting another org's values will make the agent silently authenticate against the wrong org.
 
-### Step 4 — Compile the draft into a live agent
+### Step 4 — Allow the session-minting callouts (Remote Site Settings)
 
-Setup → Agents (Agent Builder) → open **Dynamic Content Agent** → make any trivial edit or click through Save/Activate once. This compiles the deployed draft script into an actual Bot/BotVersion — without this step there's no queryable agent yet, even though the deploy reported success.
+Building an email with a Personalization Point promotes the JWT bearer token into a real Lightning session via `frontdoor.jsp`, then makes follow-up Apex HTTP callouts to complete that hop. `Auth.JWTBearerTokenExchange` (Steps 1–3's token fetch) is exempt from the outbound-callout allowlist, but these follow-up requests are not — each needs an explicit, active entry in Setup → Security → **Remote Site Settings**, or they fail with `System.CalloutException: Unauthorized endpoint`.
+
+1. Setup → Quick Find → **Remote Site Settings** → New Remote Site
+2. Add an entry pointing at `https://<your-my-domain>.file.force.com`
+3. Add a second entry pointing at `https://<your-my-domain>.lightning.force.com`
+4. Confirm both are checked **Active**, then Save
+
+Both hosts are org-specific (your own My Domain, different suffix) — they can't be shipped as deployable metadata. Every target org needs its own pair.
+
+### Step 5 — Compile the draft into a live agent
+
+Setup → Agents (Agent Builder) → open **Dynamic Content Agent** → click **Commit Version**.
+
+**Save ≠ Commit Version — confirmed live.** Clicking Save (or making a trivial edit and saving) keeps the agent in **Draft** state and does *not* produce a queryable `BotDefinition`/`BotVersion`, even though Agent Builder's Preview pane will still happily chat with it off raw draft source — which is exactly what masks this being unfinished. Symptom if you skip this: the plan-generation turn works fine (every Apex action fires and succeeds), but the moment the conversation tries to transition into the build subagent after you approve the plan, it silently goes nowhere — no error, no further Apex call, every single time. Only **Commit Version** creates the real compiled planner/plugin graph that transition needs to land on.
 
 ## Verifying it worked
 
@@ -80,4 +93,4 @@ Setup → Agents (Agent Builder) → open **Dynamic Content Agent** → make any
 sf data query --query "SELECT DeveloperName FROM BotDefinition WHERE DeveloperName = 'Dynamic_Content_Agent_v3'" -o <target-org-alias>
 ```
 
-Should return one row once Step 4 above is done. Then test a real build in Agent Builder's test chat to confirm the full JWT + LLM chain works end to end.
+Should return one row once Step 5 above is done (not just opened without error — Draft agents open fine too). Then test a real build in Agent Builder's test chat **with a personalized/dynamic element**, not just a static one, to confirm the full JWT + LLM chain and the session-minting callouts (Step 4) actually work together — a static-only build can succeed even with Step 4 missing, since it never touches Personalization Points.
