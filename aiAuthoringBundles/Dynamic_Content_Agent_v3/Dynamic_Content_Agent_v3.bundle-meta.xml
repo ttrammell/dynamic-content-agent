@@ -2,6 +2,6 @@
 <AiAuthoringBundle xmlns="http://soap.sforce.com/2006/04/metadata">
     <bundleType>AGENT</bundleType>
     <target></target>
-    <versionDescription>Dynamic content email builder: plans, personalizes, and builds Salesforce CMS emails from a data graph, with deterministic brand/asset resolution and a confirmation step before build.</versionDescription>
+    <versionDescription>Dynamic content email builder: plans, personalizes, and builds Salesforce CMS emails from a data graph, with deterministic brand/asset resolution, a confirmation step before build, and a built-in connection/workspace diagnostic.</versionDescription>
     <versionTag>1.0</versionTag>
 </AiAuthoringBundle>

@@ -108,6 +108,9 @@ variables:
     base_brand_workspaceId: mutable string = ""
         description: "CMS workspace id for the chosen brand (or org default), resolved at checklist step 2. Needed to build deterministically -- never leave this for the LLM to fill in at build time."
 
+    base_brand_workspaceOverride: mutable string = ""
+        description: "Optional user-pinned CMS workspace id, set by note_workspace_override when the user explicitly supplies one. Resolve Branding uses it as tier-0 (wins over auto-resolution). Blank = auto-resolve. Persists across requests until the user changes it."
+
     base_brand_include: mutable boolean = True
         description: "Whether the banner/footer wraps the email at all -- resolved once at checklist step 2, stored durably instead of re-derived at build time."
 
@@ -136,6 +139,9 @@ variables:
 
     base_error_pipeline: mutable string = ""
         description: "Set by the automatic drafting pipeline if assemble_content_plan_tool failed. Empty means no failure yet."
+
+    base_error_workspace: mutable string = ""
+        description: "Deterministic (Resolve Branding). Non-empty ONLY when no CMS workspace could be resolved -- an actionable reason (auth not finished / no Marketing CMS workspace). Drives a fail-fast stall so the build is never attempted with a blank workspace."
 
     base_error_issuesJson: mutable string = ""
         description: "Set by the automatic drafting pipeline after validate_content_plan_tool runs. Non-empty/non-[] means real structural issues were found."
@@ -524,7 +530,25 @@ subagent plan:
                 brandingResolved: boolean
                 brandingNote: string
                     description: "Human-readable summary of the committed branding, for the pre-approval summary."
+                workspaceError: string
+                    description: "Non-empty ONLY when no CMS workspace could be resolved -- an actionable, build-blocking reason. Drives a fail-fast stall."
             target: "apex://ResolveBrandingAction"
+
+        auth_diagnostic_action:
+            description: "Diagnoses this org's JWT self-auth and CMS workspace availability. Attempts to mint a token (never returns it), then lists email-capable Marketing CMS workspaces. Returns pass/fail plus the exact setup step to fix on failure. Read-only; creates nothing."
+            inputs:
+                unused: string
+                    description: "Ignored. No input needed -- the check is about this org's own auth/config."
+            outputs:
+                success: boolean
+                tokenMinted: boolean
+                emailWorkspaceCount: object
+                    complex_data_type_name: "lightning__integerType"
+                workspacesJson: string
+                    description: "JSON array of {id, name, apiName} for each email-capable Marketing CMS workspace found."
+                diagnostic: string
+                    description: "Human-readable result and, on failure, the exact ECA/JWT/workspace setup step to fix."
+            target: "apex://AuthDiagnosticAction"
 
     before_reasoning:
         # Deterministic, once per session -- no LLM judgment call on whether to fetch.
@@ -587,6 +611,15 @@ subagent plan:
               to revise the plan, or try a different approach?&quot; Calling
               {!@actions.note_email_request} again for a revised request resets
               the pipeline and clears the stall.
+              EXCEPTION -- setup/connection problems: if the stall is about
+              authentication, credentials, a token, or a missing CMS workspace (i.e.
+              {!@variables.base_error_pipeline} mentions auth/JWT/workspace), OR the user
+              asks why it won&apos;t build / to test the connection or setup, call
+              {!@actions.test_connection} and relay its diagnostic VERBATIM -- it names
+              the exact setup step to fix (or lists the workspaces it found). If the user
+              then supplies a specific workspace id to use, call
+              {!@actions.note_workspace_override} with it and then
+              {!@actions.note_email_request} with their original request to re-run.
 
               ALREADY BUILT: if {!@variables.base_build_attempted} is True, the email was
               already created this session -- do NOT re-plan, do NOT re-show the summary,
@@ -805,7 +838,7 @@ subagent plan:
                 set @variables.base_build_contentKey = @outputs.contentKey
                 set @variables.base_error_build = @outputs.errorMessage
                 set @variables.base_build_attempted = True
-                available when @variables.base_content_planApproved == True and @variables.base_content_validated == True and @variables.base_brand_resolved == True and @variables.base_data_needsGraphChoice == False and @variables.base_content_elementsJson != "" and @variables.base_build_attempted == False
+                available when @variables.base_content_planApproved == True and @variables.base_content_validated == True and @variables.base_brand_resolved == True and @variables.base_brand_workspaceId != "" and @variables.base_data_needsGraphChoice == False and @variables.base_content_elementsJson != "" and @variables.base_build_attempted == False
 
             lookup_email_context: @subagent.email_context
                 description: "Look up confirmed data-graph fields (for the multi-graph choice case) before drafting an email. Not for brand assets -- use note_requested_brand for that."
@@ -813,6 +846,14 @@ subagent plan:
             note_requested_brand: @utils.setVariables
                 description: "Record the brand the user named (e.g. 'Epicor'), exactly as said. Call whenever the user names or changes a brand -- a deterministic step then fetches its logo/header/record+voice; you never look those up or type contentKeys. Leave unset if no brand named."
                 with base_brand_requestedName = ...
+
+            test_connection: @actions.auth_diagnostic_action
+                description: "Run when the build stalls with an auth/workspace error, or the user asks why it won't build / to test the connection or setup. Attempts to mint the agent's JWT token and lists the org's email-capable Marketing CMS workspaces. Relay the returned diagnostic to the user verbatim -- it names the exact setup step to fix (e.g. add the refresh_token scope) or lists the workspaces found."
+                with unused = ""
+
+            note_workspace_override: @utils.setVariables
+                description: "Record a specific CMS workspace id the USER explicitly provides (e.g. from test_connection's list, or one they paste) to PIN it for the build. Call ONLY with an id the user actually gave -- never invent or guess one. A deterministic step then uses it. To clear a prior pin, set it to an empty string."
+                with base_brand_workspaceOverride = ...
 
             note_email_request: @utils.setVariables
                 description: "Record the user's email request VERBATIM (their exact words, not a paraphrase) whenever they ask for a NEW email or a CHANGE to the current one. This is the ONLY drafting call you make -- a deterministic pipeline then plans the structure, writes per-cell copy, assembles, validates, and commits branding automatically. Setting it starts a fresh plan (clears any prior draft and its approval)."
@@ -899,6 +940,7 @@ subagent plan:
             run @actions.resolve_branding_action
                 with brandContext = @variables.base_brand_context
                 with brandVoiceContext = @variables.base_brand_voice
+                with workspaceOverride = @variables.base_brand_workspaceOverride
                 set @variables.base_brand_logoKey = @outputs.resolvedLogoKey
                 set @variables.base_brand_headerKey = @outputs.resolvedHeaderKey
                 set @variables.base_brand_recordKey = @outputs.resolvedBrandRecordKey
@@ -908,6 +950,16 @@ subagent plan:
                 set @variables.base_brand_suppressHeader = @outputs.suppressHeader
                 set @variables.base_brand_note = @outputs.brandingNote
                 set @variables.base_brand_resolved = @outputs.brandingResolved
+                set @variables.base_error_workspace = @outputs.workspaceError
+
+        # Fail FAST on a missing CMS workspace -- no workspace means Build Dynamic Email cannot
+        # create anything, so stop here (before wasting the plan/copy LLM calls) and surface the
+        # actionable reason via the stall path, instead of drafting a whole plan and then hitting a
+        # cryptic missing-workspace error at build time. The build tool is also gated on a non-empty
+        # workspace (see build_dynamic_email_tool), so this can never slip through.
+        if @variables.base_brand_workspaceId == "" and @variables.base_content_userIntent != "" and @variables.base_error_stalled == False and @variables.base_data_needsGraphChoice == False:
+            set @variables.base_error_pipeline = @variables.base_error_workspace
+            set @variables.base_error_stalled = True
 
         # Deterministic PLAN -- runs here (not as an LLM tool) so it fires with the captured intent
         # and the resolved brand context, every time, cold. This is the fix for the "multi-lingual

@@ -152,7 +152,7 @@ public with sharing class FillCopyAction {
     }
 
     private static final Map<String, String> TYPE_TO_SPEC = new Map<String, String>{
-        'heading'   => 'Element type: heading. Target length: short, under 10 words.',
+        'heading'   => 'Element type: heading. Target length: short, under 12 words. When a specific audience is given, REFLECT it in the heading -- do NOT fall back to a generic brand tagline; make this heading meaningfully different from the generic version and from other segments\' headings.',
         'paragraph' => 'Element type: paragraph. Target length: 1 to 2 sentences.',
         'button'    => 'Element type: button label. Target length: 2 to 4 words.'
     };

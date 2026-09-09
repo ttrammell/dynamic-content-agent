@@ -26,6 +26,12 @@ public with sharing class ResolveBrandingAction {
         // "None available"/blank means no brand record -> no colorScheme/typography override.
         @InvocableVariable(label='Brand Voice Context (records JSON)')
         public String brandVoiceContext;
+
+        // Optional user-supplied CMS workspace id to PIN (from note_workspace_override). When
+        // present, it wins over all auto-resolution tiers -- the escape hatch for when auto-resolve
+        // can't find/picks the wrong workspace but the user knows the right id. Blank = auto-resolve.
+        @InvocableVariable(label='Workspace Override')
+        public String workspaceOverride;
     }
 
     public class Result {
@@ -50,6 +56,12 @@ public with sharing class ResolveBrandingAction {
         // Human-readable summary of what was resolved, for the pre-approval summary.
         @InvocableVariable(label='Branding Note')
         public String brandingNote;
+        // Non-empty ONLY when no CMS workspace could be resolved -- an actionable, build-blocking
+        // reason (auth not finished / no Marketing CMS workspace). The agent turns this into a
+        // fail-fast stall so a fresh install is told what to fix instead of hitting a cryptic
+        // missing-workspace error at build time.
+        @InvocableVariable(label='Workspace Error')
+        public String workspaceError;
     }
 
     // Same test seam / token source the other callout actions use (DataGraphDetailsAction,
@@ -69,7 +81,13 @@ public with sharing class ResolveBrandingAction {
     // and lets Build Dynamic Email report a plain missing-workspace rather than a Commerce-space
     // content-type 400. This is the only reliable way to tell a "Marketing" space from an
     // "Enhanced CMS"/Commerce one, since that distinction isn't exposed to Apex SOQL.
+    // Set by resolveEmailCapableWorkspaceId() to explain WHY it returned '' (auth vs. no marketing
+    // space vs. callout error) so the caller can surface an actionable reason instead of a cryptic
+    // missing-workspace build failure. Empty string means "resolved fine / not the reason".
+    @TestVisible static String workspaceDiag = '';
+
     private static String resolveEmailCapableWorkspaceId() {
+        workspaceDiag = '';
         try {
             String accessToken = tokenSource.getAccessToken();
             HttpRequest httpReq = new HttpRequest();
@@ -79,7 +97,11 @@ public with sharing class ResolveBrandingAction {
             httpReq.setHeader('Authorization', 'Bearer ' + accessToken);
             httpReq.setTimeout(30000);
             HttpResponse httpRes = new Http().send(httpReq);
-            if (httpRes.getStatusCode() != 200) { return ''; }
+            if (httpRes.getStatusCode() != 200) {
+                workspaceDiag = 'the CMS /spaces call returned HTTP ' + httpRes.getStatusCode()
+                    + ' -- the JWT/External Client App auth is most likely not finished for this org';
+                return '';
+            }
 
             Map<String, Object> body = (Map<String, Object>) JSON.deserializeUntyped(httpRes.getBody());
             List<Object> spaces = body.get('spaces') instanceof List<Object>
@@ -105,8 +127,13 @@ public with sharing class ResolveBrandingAction {
                 }
             }
             if (String.isNotBlank(defaultId)) { return defaultId; }
-            return firstByName == null ? '' : String.valueOf(firstByName.get('id'));
+            if (firstByName != null) { return String.valueOf(firstByName.get('id')); }
+            workspaceDiag = 'this org has no email-capable CMS workspace (no Enhanced space of type '
+                + '"marketing") -- create/enable a Marketing CMS workspace before building emails';
+            return '';
         } catch (Exception e) {
+            workspaceDiag = 'the CMS /spaces call failed (' + e.getMessage()
+                + ') -- likely the JWT/External Client App auth or a Remote Site Setting is missing';
             return '';
         }
     }
@@ -128,7 +155,7 @@ public with sharing class ResolveBrandingAction {
         return hay.contains(needle);
     }
 
-    @InvocableMethod(label='Resolve Branding' description='Deterministically commits the looked-up brand assets/record into the durable resolved branding keys Build Dynamic Email reads. Makes no callouts and creates nothing.')
+    @InvocableMethod(label='Resolve Branding' description='Deterministically commits the looked-up brand assets/record into the durable resolved branding keys Build Dynamic Email reads. May make read-only callouts to resolve a default CMS workspace when none was supplied. Creates nothing.')
     public static List<Result> resolveBranding(List<Request> requests) {
         List<Result> results = new List<Result>();
         for (Request req : requests) {
@@ -137,6 +164,7 @@ public with sharing class ResolveBrandingAction {
             res.resolvedHeaderKey = '';
             res.resolvedBrandRecordKey = '';
             res.resolvedContentSpaceId = '';
+            res.workspaceError = '';
             res.includeBranding = true;
             res.suppressLogo = true;
             res.suppressHeader = true;
@@ -147,7 +175,8 @@ public with sharing class ResolveBrandingAction {
 
             Map<String, Object> logo;
             Map<String, Object> header;
-            String workspaceId = '';
+            // Tier 0: a user-pinned workspace id wins over every auto-resolution tier below.
+            String workspaceId = (req.workspaceOverride == null) ? '' : req.workspaceOverride.trim();
             for (Object o : parseArray(req.brandContext)) {
                 if (!(o instanceof Map<String, Object>)) { continue; }
                 Map<String, Object> asset = (Map<String, Object>) o;
@@ -239,6 +268,21 @@ public with sharing class ResolveBrandingAction {
                 : 'no brand record (default colors/fonts)');
             res.brandingNote = 'Branding: ' + String.join(noteParts, ', ')
                 + (usedDefaultFallback ? ' -- ORG DEFAULT assets/workspace used, no specific brand resolved' : '') + '.';
+
+            // No workspace resolved by ANY tier -> the build will fail with a cryptic missing-workspace
+            // error. Surface the real, actionable reason in the note (shown verbatim in the confirm
+            // summary) so a fresh install says WHAT to fix instead of just failing at build time.
+            if (String.isBlank(workspaceId)) {
+                res.brandingNote += ' WARNING: no CMS workspace could be resolved, so the build will '
+                    + 'fail until this is fixed'
+                    + (String.isBlank(workspaceDiag) ? '' : (' -- ' + workspaceDiag)) + '.';
+                // Actionable, build-blocking reason the agent surfaces as a fail-fast stall.
+                res.workspaceError = 'No CMS workspace could be resolved for this org, so no email can '
+                    + 'be built'
+                    + (String.isBlank(workspaceDiag) ? '' : (' -- ' + workspaceDiag))
+                    + '. Provision/enable a Marketing CMS workspace (and finish the JWT/External Client '
+                    + 'App setup), then try again.';
+            }
 
             results.add(res);
         }

@@ -55,7 +55,7 @@ public with sharing class ValidateContentPlanAction {
         return out;
     }
 
-    @InvocableMethod(label='Validate Content Plan' description='Checks a drafted content plan (elementsJson/personalizationsJson) for structural problems -- missing textByDecision entries, unknown element keys, invalid decision criteria, too many PersonalizationPoints or decisions -- before asking the user to approve it. Makes no changes and creates nothing.')
+    @InvocableMethod(label='Validate Content Plan' description='Checks a drafted content plan (elementsJson/personalizationsJson) for structural problems -- unfilled elements (empty text/url/contentKey), missing textByDecision entries, unknown element keys, invalid decision criteria, too many PersonalizationPoints or decisions -- before asking the user to approve it. Makes no changes and creates nothing.')
     public static List<Result> validateContentPlan(List<Request> requests) {
         List<Result> results = new List<Result>();
         for (Request req : requests) {
@@ -64,9 +64,35 @@ public with sharing class ValidateContentPlanAction {
             try {
                 Set<String> elementKeys = new Set<String>();
                 List<Object> elements = (List<Object>) JSON.deserializeUntyped(req.elementsJson);
+                if (elements.isEmpty()) {
+                    issues.add('The plan has no content elements to build.');
+                }
+                // Every element must be FILLED before build -- confirmed live that an empty text
+                // slot (or an image with no contentKey) only surfaced as a build-time failure. Assert
+                // it here so a blank element fails validation (and the build gate) up front, not at build.
                 for (Object elObj : elements) {
                     Map<String, Object> el = (Map<String, Object>) elObj;
-                    elementKeys.add(String.valueOf(el.get('key')));
+                    String key = String.valueOf(el.get('key'));
+                    elementKeys.add(key);
+                    String type = el.get('type') == null ? '' : String.valueOf(el.get('type'));
+                    if (type == 'image') {
+                        String ck = el.get('contentKey') == null ? '' : String.valueOf(el.get('contentKey'));
+                        if (String.isBlank(ck) || ck == 'null' || !ck.startsWith('MC')) {
+                            issues.add('Element "' + key + '" (image) has no valid contentKey -- every element must be filled before building.');
+                        }
+                    } else {
+                        String txt = el.get('text') == null ? '' : String.valueOf(el.get('text'));
+                        if (String.isBlank(txt) || txt == 'null') {
+                            issues.add('Element "' + key + '" (' + (String.isBlank(type) ? 'text' : type)
+                                + ') has no text -- every element must be filled before building.');
+                        }
+                        if (type == 'button') {
+                            String url = el.get('url') == null ? '' : String.valueOf(el.get('url'));
+                            if (String.isBlank(url) || url == 'null') {
+                                issues.add('Button element "' + key + '" has no link URL -- every element must be filled before building.');
+                            }
+                        }
+                    }
                 }
 
                 if (String.isNotBlank(req.personalizationsJson)) {

@@ -11,6 +11,7 @@
     </types>
     <types>
         <members>AssembleContentPlanAction</members>
+        <members>AuthDiagnosticAction</members>
         <members>BuildDynamicEmailAction</members>
         <members>ConfirmBuildAction</members>
         <members>DataGraphDetailsAction</members>
