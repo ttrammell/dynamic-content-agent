@@ -89,6 +89,16 @@ Setup → Agents (Agent Builder) → open **Dynamic Content Agent** → click **
 
 **Save ≠ Commit Version — confirmed live.** Clicking Save (or making a trivial edit and saving) keeps the agent in **Draft** state and does *not* produce a queryable `BotDefinition`/`BotVersion`, even though Agent Builder's Preview pane will still happily chat with it off raw draft source — which is exactly what masks this being unfinished. Symptom if you skip this: the plan-generation turn works fine (every Apex action fires and succeeds), but the moment the conversation tries to transition into the build subagent after you approve the plan, it silently goes nowhere — no error, no further Apex call, every single time. Only **Commit Version** creates the real compiled planner/plugin graph that transition needs to land on.
 
+### Step 6 — Grant Agent Access (make it visible to users)
+
+Committing a version makes the agent *live and queryable*, but an internal (Employee) agent is still invisible to users until you grant **Agent Access** — a Profile/Permission Set grant, not a connection (internal agents have none).
+
+1. Setup → the target **Profile** or **Permission Set** (the one you pre-authorized in Step 2 is a convenient choice) → **App → Agent Access**
+2. Add **Dynamic Content Agent** (`Dynamic_Content_Agent_v3`)
+3. Save
+
+Without this, the agent runs but no one can see or launch it from the UI.
+
 ## Verifying it worked
 
 ```
