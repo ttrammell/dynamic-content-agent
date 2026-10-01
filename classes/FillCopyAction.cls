@@ -58,8 +58,30 @@ public with sharing class FillCopyAction {
         @InvocableVariable(label='Normalized Plan JSON')
         public String normalizedPlanJson;
 
+        // Non-fatal note when personalization VALUES were auto-dropped to fit the copy-piece cap
+        // (a broad "all eligible" over many values). Empty when nothing was trimmed. Surfaced so the
+        // reduction is never silent.
+        @InvocableVariable(label='Copy Note')
+        public String copyNote;
+
         @InvocableVariable(label='Error Message')
         public String errorMessage;
+    }
+
+    // Copy-piece projection: 3 meta cells + for each non-image slot, 1 default + one per applying
+    // decision. Images swap (no LLM copy). Shared by the cap check and the auto-reduce loop so both
+    // measure identically. (subject_preheader is counted as a text slot here -- conservative; its fill
+    // is actually subject+preheader, so this never under-guards the LLM-call budget in a harmful way.)
+    private static Integer projectCells(List<Object> slots, Map<String, List<Map<String, Object>>> persBySlot) {
+        Integer cells = 3;
+        for (Object sObj : slots) {
+            Map<String, Object> s = (Map<String, Object>) sObj;
+            if (String.valueOf(s.get('type')) == 'image') { continue; }
+            cells += 1;
+            List<Map<String, Object>> ap = persBySlot.get(String.valueOf(s.get('key')));
+            if (ap != null) { cells += ap.size(); }
+        }
+        return cells;
     }
 
     // Test seam -- ConnectApi.EinsteinLLM can't be intercepted by HttpCalloutMock, same constraint
@@ -151,6 +173,40 @@ public with sharing class FillCopyAction {
         return 'English';
     }
 
+    // A CMS actionButton's text is capped at 255 chars by the org (INVALID_FIELD on PUT otherwise),
+    // and a real button LABEL is only a few words -- but the LLM sometimes returns a full sentence for
+    // an industry/segment variant, which blew the limit ("...button > text may only be 255 characters").
+    // Clamp button copy to a short label deterministically: trim, and if too long cut on a word boundary
+    // to <=40 chars (well under the hard 255 -- keeps it a label, not a paragraph). No-op for short labels.
+    private static final Integer BUTTON_LABEL_MAX = 40;
+    private static String clampButtonLabel(String s) {
+        if (String.isBlank(s)) { return s; }
+        String t = s.trim();
+        if (t.length() <= BUTTON_LABEL_MAX) { return t; }
+        String cut = t.substring(0, BUTTON_LABEL_MAX);
+        Integer sp = cut.lastIndexOf(' ');
+        if (sp >= 12) { cut = cut.substring(0, sp); }   // prefer a word boundary, but keep a usable label
+        return cut.trim();
+    }
+
+    // Real CMS field maxima (probed live on the org via an over-length create, 2026-09-30):
+    //   subjectLine 255, preheader 255, sfdc_cms:title 200 (image altText shares the 255 attributes cap).
+    // Same class as the button-label bug: the LLM gets only a "target length" hint and can exceed the
+    // hard limit on a translated/industry VARIANT, failing the build PUT (INVALID_API_INPUT "may only be
+    // N characters long"). Clamp a few chars UNDER each real max, on a word boundary. No-op when short.
+    private static final Integer SUBJECT_MAX   = 250;   // org hard limit 255
+    private static final Integer PREHEADER_MAX = 250;   // org hard limit 255
+    private static final Integer TITLE_MAX     = 195;   // org hard limit 200
+    private static String clampLen(String s, Integer maxLen) {
+        if (String.isBlank(s)) { return s; }
+        String t = s.trim();
+        if (t.length() <= maxLen) { return t; }
+        String cut = t.substring(0, maxLen);
+        Integer sp = cut.lastIndexOf(' ');
+        if (sp >= maxLen / 2) { cut = cut.substring(0, sp); }   // word boundary if it doesn't over-trim
+        return cut.trim();
+    }
+
     private static final Map<String, String> TYPE_TO_SPEC = new Map<String, String>{
         'heading'   => 'Element type: heading. Target length: short, under 12 words. When a specific audience is given, REFLECT it in the heading -- do NOT fall back to a generic brand tagline; make this heading meaningfully different from the generic version and from other segments\' headings.',
         'paragraph' => 'Element type: paragraph. Target length: 1 to 2 sentences.',
@@ -162,6 +218,14 @@ public with sharing class FillCopyAction {
     private static final String NO_TOKEN_SPEC =
         ' IMPORTANT: write plain text only -- do NOT include any merge token or {{...}} placeholder '
         + '(no {{FirstName}}, {{LastName}}, {{AccountName}}, etc.); this element cannot resolve them.';
+
+    // Appended to the RuleCase for body cells when the plan has NO name axis. FillSlot is otherwise
+    // told to embed {{FirstName}} when a name field is in play, and on a translate/industry run the
+    // model tends to greet by name on its own -- producing "Hi {{FirstName}}," (or, translated, an
+    // orphaned honorific like a dangling "様" once the token is stripped). Tell it plainly not to.
+    private static final String NO_GREETING_SUFFIX =
+        ' -- Do NOT address the recipient by name and do NOT include any merge token or {{...}} '
+        + 'placeholder (no {{FirstName}}/{{LastName}}/{{AccountName}}); this audience is not personalized by name.';
 
     // Deterministic backstop for the above: remove any merge token that slipped into a meta field.
     // {{x|fallback}} -> fallback; {{x}} -> removed; then tidy orphaned spaces/greeting punctuation
@@ -176,6 +240,41 @@ public with sharing class FillCopyAction {
         s = s.replaceAll('([,;:])\\s*([.!?,;:])', '$2');          // collapse orphaned punct runs ("Save now,!" -> "Save now!")
         s = s.replaceAll('^[\\s,;:.!?\\-]+', '');                 // no leading punctuation
         s = s.replaceAll('[\\s,;:\\-]+$', '');                    // no trailing punctuation
+        return s.trim();
+    }
+
+    // Whether the plan personalizes on a recipient NAME/company field (FirstName/LastName/
+    // AccountName). Only then is a {{FirstName}} token in body copy something the user asked for.
+    // On any other axis (industry, country/translate, persona) a name token is the FillSlot model
+    // greeting on its own initiative -- unwanted -- so we strip it (stripNameTokensFromBody).
+    private static Boolean planHasNameAxis(List<Object> pers) {
+        for (Object pObj : pers) {
+            if (!(pObj instanceof Map<String, Object>)) { continue; }
+            Map<String, Object> p = (Map<String, Object>) pObj;
+            if (String.isNotBlank(mergeTokenFor(String.valueOf(p.get('fieldApiName'))))) { return true; }
+        }
+        return false;
+    }
+
+    // Remove ONLY name/company merge tokens ({{FirstName}}, {{LastName}}, {{AccountName}}, with or
+    // without a |fallback) that the fill model injected into body copy uninvited, then tidy the
+    // orphaned greeting punctuation ("Bonjour {{FirstName}}," -> "Bonjour"). Same cleanup shape as
+    // stripMergeTokens but scoped to name tokens so it never touches other legitimate tokens.
+    // Called on body cells ONLY when the plan has no name axis (planHasNameAxis == false).
+    @TestVisible
+    static String stripNameTokensFromBody(String s) {
+        if (String.isBlank(s)) { return s; }
+        // Case-insensitive match on the known name tokens; keep any |fallback, else drop the token.
+        String pat = '(?i)\\{\\{\\s*(first ?name|last ?name|account ?name|company ?name)\\s*';
+        s = s.replaceAll(pat + '\\|([^{}]*)\\}\\}', '$2');   // keep the fallback text
+        s = s.replaceAll(pat + '\\}\\}', '');                // drop the token entirely
+        s = s.replaceAll('\\s+', ' ');
+        s = s.replaceAll(' +([,.!?;:])', '$1');
+        s = s.replaceAll('([,;:])\\s*([.!?,;:])', '$2');
+        // Leading greeting-comma cleanup: "Bonjour , welcome" / ", welcome" -> "welcome" is too
+        // aggressive; instead just remove a dangling leading comma/space left where a name was.
+        s = s.replaceAll('^[\\s,;:]+', '');
+        s = s.replaceAll('[\\s,;:]+$', '');
         return s.trim();
     }
 
@@ -247,7 +346,14 @@ public with sharing class FillCopyAction {
     static Boolean intentAsksFullTranslate(String intent) {
         if (String.isBlank(intent)) { return false; }
         String s = intent.toLowerCase();
-        return s.contains('translate')            // translate / translated / translation
+        return s.contains('translat')             // stem: translate/translated/translating/translation/translations
+                                                  // (the old 'translate' MISSED "translation"/"translations" --
+                                                  //  "translations" has no "translate" substring -- so a plan whose
+                                                  //  intent the LLM rephrased as "show translations" failed the
+                                                  //  full-translate backstop, isFullTranslate returned false, no
+                                                  //  Country PP was injected, and assemble produced ZERO
+                                                  //  personalizations -> "no personalization to apply". Root cause
+                                                  //  of the stochastic translate wedge.)
             || s.contains('multilingual')
             || s.contains('multi-lingual')
             || s.contains('multi lingual')
@@ -408,9 +514,31 @@ public with sharing class FillCopyAction {
             // to this unconditionally -- even on an early error it never wipes the plan.
             res.normalizedPlanJson = req.structurePlanJson;
             res.errorMessage = '';
+            res.copyNote = '';
             try {
-                Map<String, Object> plan = (Map<String, Object>) JSON.deserializeUntyped(req.structurePlanJson);
+                Map<String, Object> plan = (Map<String, Object>) JSON.deserializeUntyped(AuraPocJson.stripFence(req.structurePlanJson));
                 List<Object> slots = plan.get('slots') instanceof List<Object> ? (List<Object>) plan.get('slots') : new List<Object>();
+
+                // PLAN-STRUCTURE GUARD -- the plan prompt template (AuraPoc_PlanEmailStructureV2)
+                // INTERMITTENTLY returns an English PROSE description instead of the structured JSON
+                // (confirmed live via a gate-var debug bundle: structurePlanJson came back as
+                // "{personalizations by country: FR, ES, JP; slots: heading, greeting...}" -- parseable
+                // enough to NOT throw, but with NO usable slots[] array). That silently produced an
+                // empty plan: buildLanguagePersonalizations([], ...) over zero slots -> no copy cells ->
+                // assemble emitted no personalizations -> nothing built, no error, pp stayed 0 while the
+                // agent narrated "the update is being applied" (the HALLUCINATED-PROGRESS root cause on
+                // translate/update). Fail LOUD here instead: an empty slots[] on a non-empty plan means
+                // the planner didn't structure it. errorMessage -> base_error_pipeline -> STALL GUARD
+                // surfaces an honest "couldn't structure the plan, rephrase" instead of a silent no-op.
+                if (slots.isEmpty()) {
+                    res.success = false;
+                    res.errorMessage = 'The personalization plan did not come back in a usable form '
+                        + '(no content slots were identified). Please restate the request -- e.g. '
+                        + '"translate this email into Spanish, French and Japanese, keeping English as '
+                        + 'the default" -- and I will re-plan it.';
+                    results.add(res);
+                    continue;
+                }
 
                 // Prefer the REAL user intent (bound from the agent's captured variable) over the
                 // plan LLM's echo -- the echo can be missing/paraphrased on a cold turn, which is
@@ -443,19 +571,55 @@ public with sharing class FillCopyAction {
                     }
                 }
 
-                // Project the cell count (3 meta + per non-image slot: 1 default + applying decisions)
-                Integer cells = 3;
-                for (Object sObj : slots) {
-                    Map<String, Object> s = (Map<String, Object>) sObj;
-                    if (String.valueOf(s.get('type')) == 'image') { continue; }
-                    cells += 1;
-                    List<Map<String, Object>> ap = persBySlot.get(String.valueOf(s.get('key')));
-                    if (ap != null) { cells += ap.size(); }
+                // Project the cell count (3 meta + per non-image slot: 1 default + applying decisions).
+                Integer cells = projectCells(slots, persBySlot);
+
+                // AUTO-REDUCE VALUES to fit the copy-piece cap instead of dead-ending. A broad "all
+                // eligible" over several values (e.g. 6 slots x 3 industries) can exceed MAX_CELLS. Rather
+                // than fail, drop personalization VALUES -- trimming the axis with the most values first,
+                // one value at a time -- until it fits (never below 1 value per axis). Keeps the email
+                // buildable with fewer variants; the dropped values are surfaced in a note. Trimming the
+                // plan's personalizations here also flows to Assemble/Build via normalizedPlanJson, so
+                // fill + assemble + build all agree on the reduced set.
+                List<String> reduceNotes = new List<String>();
+                while (cells > MAX_CELLS) {
+                    // Group personalization entries by field axis (fieldApiName); an axis with >1 value
+                    // is a candidate to shrink. Find the axis with the most values and drop its last one.
+                    Map<String, List<Map<String, Object>>> byField = new Map<String, List<Map<String, Object>>>();
+                    for (Object pObj : pers) {
+                        Map<String, Object> p = (Map<String, Object>) pObj;
+                        String f = String.valueOf(p.get('fieldApiName'));
+                        if (!byField.containsKey(f)) { byField.put(f, new List<Map<String, Object>>()); }
+                        byField.get(f).add(p);
+                    }
+                    String biggest; Integer biggestN = 1;
+                    for (String f : byField.keySet()) {
+                        if (byField.get(f).size() > biggestN) { biggestN = byField.get(f).size(); biggest = f; }
+                    }
+                    if (biggest == null) { break; }   // every axis already at 1 value -> can't reduce further
+                    // Remove the LAST entry of the biggest axis from pers + persBySlot.
+                    Map<String, Object> victim = byField.get(biggest)[byField.get(biggest).size() - 1];
+                    pers.remove(pers.indexOf(victim));
+                    for (List<Map<String, Object>> lst : persBySlot.values()) {
+                        Integer idx = lst.indexOf(victim);
+                        if (idx >= 0) { lst.remove(idx); }
+                    }
+                    reduceNotes.add(String.valueOf(victim.get('label')) != null
+                        ? String.valueOf(victim.get('label')) : String.valueOf(victim.get('value')));
+                    cells = projectCells(slots, persBySlot);
+                }
+                if (!reduceNotes.isEmpty()) {
+                    // Persist the trimmed plan so Assemble/Build use the same reduced set.
+                    plan.put('personalizations', pers);
+                    res.normalizedPlanJson = JSON.serialize(plan);
+                    res.copyNote = 'To stay within the ' + MAX_CELLS + '-copy-piece limit for this email, these '
+                        + 'personalization value(s) were dropped: ' + String.join(reduceNotes, ', ')
+                        + '. Reduce content slots or values to keep more.';
                 }
                 if (cells > MAX_CELLS) {
                     res.errorMessage = 'This email needs ' + cells + ' copy pieces (slot text plus one per personalization value), '
-                        + 'which exceeds the limit of ' + MAX_CELLS + '. Ask the user to reduce the number of personalization '
-                        + 'values or content slots.';
+                        + 'which exceeds the limit of ' + MAX_CELLS + ' even after reducing to one value per axis. '
+                        + 'Reduce the number of content slots being personalized.';
                     results.add(res);
                     continue;
                 }
@@ -472,14 +636,26 @@ public with sharing class FillCopyAction {
                 // Meta copy is the email's BASE (untranslated) layer -- always English; per-language
                 // variants live in the slot body cells below.
                 String title = stripMergeTokens(fillCell(theme, voice,
-                    'Element type: internal email title. Target length: under 12 words.' + NO_TOKEN_SPEC,
-                    strOf(plan.get('titleGoal'), 'a concise internal title for this email'), 'a general audience', 'English'));
-                String subject = stripMergeTokens(fillCell(theme, voice,
+                    'Element type: internal email title (a specific, human-readable NAME for this email '
+                    + 'as it appears in a content list). Target length: 3-8 words. Name it after the '
+                    + 'concrete brand/product + topic + audience of THIS email (e.g. "Konica Minolta '
+                    + 'Industry Spotlight" or "AMD Gamer Tier Promo"). Do NOT return a generic label '
+                    + '("Marketing Email", "Promotional Email", "Newsletter"), do NOT include a number, '
+                    + 'date, ID, or placeholder token.' + NO_TOKEN_SPEC,
+                    strOf(plan.get('titleGoal'), 'a specific name naming this email\'s brand, topic, and audience'), 'a general audience', 'English'));
+                title = clampLen(title, TITLE_MAX);
+                String subject = clampLen(stripMergeTokens(fillCell(theme, voice,
                     'Element type: email subject line. Target length: under 60 characters.' + NO_TOKEN_SPEC,
-                    strOf(plan.get('subjectLineGoal'), 'a compelling subject line'), 'a general audience', 'English'));
-                String preheader = stripMergeTokens(fillCell(theme, voice,
+                    strOf(plan.get('subjectLineGoal'), 'a compelling subject line'), 'a general audience', 'English')), SUBJECT_MAX);
+                String preheader = clampLen(stripMergeTokens(fillCell(theme, voice,
                     'Element type: email preheader. Target length: under 100 characters.' + NO_TOKEN_SPEC,
-                    strOf(plan.get('preheaderGoal'), 'a preheader that complements the subject line'), 'a general audience', 'English'));
+                    strOf(plan.get('preheaderGoal'), 'a preheader that complements the subject line'), 'a general audience', 'English')), PREHEADER_MAX);
+
+                // A {{FirstName}} in body copy is legitimate ONLY when the plan personalizes on a
+                // name field. On any other axis (industry, translate/country, persona) the fill
+                // model sometimes greets by name on its own -- strip those uninvited tokens so a
+                // translate/industry run doesn't sprout "Hi {{FirstName}}," in every variant.
+                Boolean hasNameAxis = planHasNameAxis(pers);
 
                 Map<String, Object> copyBySlot = new Map<String, Object>();
                 for (Object sObj : slots) {
@@ -487,12 +663,43 @@ public with sharing class FillCopyAction {
                     String type = String.valueOf(s.get('type'));
                     if (type == 'image') { continue; }   // images carry a contentKey, not text
                     String key = String.valueOf(s.get('key'));
+
+                    // SUBJECT/PREHEADER component: write a per-decision {subjectLine, preheader} object
+                    // (both vary together). No block-copy default -- the email's existing subject/preheader
+                    // are the base; only the personalized variants are written here. Subject <=60 chars,
+                    // preheader <=100. Assemble reads these objects from byPersonalization into the variant.
+                    if (type == 'subject_preheader') {
+                        List<Map<String, Object>> spAp = persBySlot.get(key);
+                        if (spAp != null && !spAp.isEmpty()) {
+                            Map<String, Object> byP = new Map<String, Object>();
+                            String sGoal = strOf(s.get('goal'), 'a subject line and preheader tailored to the audience');
+                            for (Map<String, Object> p : spAp) {
+                                String ruleCase = buildRuleCase(p);
+                                String lang = fillLanguageFor(p);
+                                String subjV = clampLen(fillCell(theme, voice,
+                                    'Element type: email subject line. Target length: under 60 characters.' + NO_TOKEN_SPEC,
+                                    sGoal, ruleCase, lang), SUBJECT_MAX);
+                                String preV = clampLen(fillCell(theme, voice,
+                                    'Element type: email preheader. Target length: under 100 characters.' + NO_TOKEN_SPEC,
+                                    sGoal, ruleCase, lang), PREHEADER_MAX);
+                                byP.put(String.valueOf(p.get('name')),
+                                    new Map<String, Object>{ 'subjectLine' => subjV, 'preheader' => preV });
+                            }
+                            copyBySlot.put(key, new Map<String, Object>{ 'byPersonalization' => byP });
+                        }
+                        continue;
+                    }
                     String spec = TYPE_TO_SPEC.containsKey(type) ? TYPE_TO_SPEC.get(type) : TYPE_TO_SPEC.get('paragraph');
                     String goal = strOf(s.get('goal'), 'write appropriate copy for this element');
 
+                    Boolean isButton = (type == 'button');
                     Map<String, Object> slotCopy = new Map<String, Object>();
-                    slotCopy.put('default', fillCell(theme, voice, spec, goal, 'a general audience with no specific segment', 'English'));
-                    if (type == 'button') {
+                    String defRule = 'a general audience with no specific segment' + (hasNameAxis ? '' : NO_GREETING_SUFFIX);
+                    String defCell = fillCell(theme, voice, spec, goal, defRule, 'English');
+                    if (!hasNameAxis) { defCell = stripNameTokensFromBody(defCell); }
+                    if (isButton) { defCell = clampButtonLabel(defCell); }
+                    slotCopy.put('default', defCell);
+                    if (isButton) {
                         // URL is not an LLM decision -- same testing default the old copy step used.
                         slotCopy.put('url', 'https://www.example.com');
                     }
@@ -500,8 +707,11 @@ public with sharing class FillCopyAction {
                     if (ap != null && !ap.isEmpty()) {
                         Map<String, Object> byP = new Map<String, Object>();
                         for (Map<String, Object> p : ap) {
-                            byP.put(String.valueOf(p.get('name')),
-                                fillCell(theme, voice, spec, goal, buildRuleCase(p), fillLanguageFor(p)));
+                            String rule = buildRuleCase(p) + (hasNameAxis ? '' : NO_GREETING_SUFFIX);
+                            String cell = fillCell(theme, voice, spec, goal, rule, fillLanguageFor(p));
+                            if (!hasNameAxis) { cell = stripNameTokensFromBody(cell); }
+                            if (isButton) { cell = clampButtonLabel(cell); }
+                            byP.put(String.valueOf(p.get('name')), cell);
                         }
                         slotCopy.put('byPersonalization', byP);
                     }

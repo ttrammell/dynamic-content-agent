@@ -36,6 +36,9 @@ variables:
     base_brand_context: mutable string = "None available"
         description: "Brand asset name-to-contentKey pairs discovered via Find Brand Assets. \"None available\" until looked up -- never empty/null, since the underlying prompt template's merge resolution fails hard on a null input."
 
+    base_brand_planContext: mutable string = "None available"
+        description: "Brand asset context folded with the brand VOICE prose (description/identity/tone), produced deterministically by Resolve Branding and bound to Plan's BrandContext so the plan is voice-aware. Falls back to asset context alone when no brand voice exists."
+
     base_data_graphContext: mutable string = "None available"
         description: "Confirmed data-graph field API names available for personalization. \"None available\" until looked up -- never empty/null, since the underlying prompt template's merge resolution fails hard on a null input."
 
@@ -96,6 +99,9 @@ variables:
     base_content_planApproved: mutable boolean = False
         description: "v21 explicit-confirm gate. Set True by confirm_plan_tool when the user approves the plan summary; build_dynamic_email_tool is not available until it is True. Cleared by note_email_request (a fresh/revised plan needs re-approval)."
 
+    base_content_understandingOk: mutable boolean = False
+        description: "Soft understanding gate (Feature 1). True once the user confirms the agent's read-back of the brand + main intent. Cleared by note_email_request. Skippable for a specific one-shot. Distinct from planApproved (the hard, post-plan approval)."
+
     base_brand_logoKey: mutable string = ""
         description: "Logo contentKey resolved at checklist step 2 -- stored once so Build Dynamic Email reads it durably instead of re-deriving it from conversation history, which silently drops branding in a long back-and-forth."
 
@@ -141,10 +147,46 @@ variables:
         description: "Set by the automatic drafting pipeline if assemble_content_plan_tool failed. Empty means no failure yet."
 
     base_error_workspace: mutable string = ""
-        description: "Deterministic (Resolve Branding). Non-empty ONLY when no CMS workspace could be resolved -- an actionable reason (auth not finished / no Marketing CMS workspace). Drives a fail-fast stall so the build is never attempted with a blank workspace."
+        description: "Deterministic (set by Resolve Branding / Test Connection). Non-empty ONLY when no CMS workspace could be resolved -- an actionable reason. Drives a fail-fast stall so the build is never attempted with a blank workspace."
+
+    base_content_recommendedWorkspace: mutable string = ""
+        description: "Deterministic (Test Connection / auth_diagnostic). The email-capable Marketing CMS workspace the diagnostic recommends (Default else first-by-name). Used to AUTO-RECOVER a blank workspace: if present, the agent pins it and retries once."
+
+    base_error_recoveryTried: mutable boolean = False
+        description: "Deterministic, not LLM-set. True once the agent has attempted a one-time workspace auto-recovery (pin the recommended workspace + retry). Prevents a recovery loop -- a second blank stalls with the diagnostic instead. Reset by a fresh note_email_request."
 
     base_error_issuesJson: mutable string = ""
         description: "Set by the automatic drafting pipeline after validate_content_plan_tool runs. Non-empty/non-[] means real structural issues were found."
+
+    base_update_targetKey: mutable string = ""
+        description: "Content key of an EXISTING email to add DC to (update, not build). Set by note_update_target, or promoted from base_update_readKey in after_reasoning when a read and a change request coincide. Empty=build new; set=update."
+
+    base_update_readKey: mutable string = ""
+        description: "Content key of the last email read via read_dynamic_email (echoed by the action). after_reasoning promotes it to base_update_targetKey only when a change request also exists; a pure inspection leaves the target empty, so the build path is unaffected."
+
+    base_update_slotBindingsJson: mutable string = "[]"
+        description: "Update slot bindings: JSON array of {elementKey, slot} pairs. DERIVED by Assemble from the read blocks (not LLM-set) -- each axis binds to the first eligible slot of its type; over-planned axes dropped. '[]' for a new build."
+
+    base_update_emailBlocks: mutable string = ""
+        description: "The existing email's numbered content blocks from the last Read ([{slot, id, def, personalized}]). Fed to plan-time validation so a bad update slot (wrong type, out of range, already personalized) is caught before approval. Cleared by note_email_request."
+
+    base_update_structurePlanJson: mutable string = ""
+        description: "Update-planner's own output slot, kept separate from base_content_structurePlanJson so the update and create planner runs never share a compiled condition/output slot. A later step copies it across. Cleared by note_email_request."
+
+    base_update_planSlotsJson: mutable string = ""
+        description: "Typed update intent (from note_update_plan): JSON array of target SLOT numbers to personalize, e.g. [3]. Empty falls back to parsing the request text. Feeds Plan Email Update. Cleared by note_email_request."
+
+    base_update_planField: mutable string = ""
+        description: "Typed update intent: the personalization field in natural words, e.g. 'industry'. Resolved against the data-graph catalog by Plan Email Update. Cleared by note_email_request."
+
+    base_update_planValuesJson: mutable string = "[]"
+        description: "Typed update intent: JSON array of values, e.g. [\"Technology\",\"Healthcare\",\"Finance\"] -- one variant per value. '[]' means personalize on presence (HasValue). Cleared by note_email_request."
+
+    base_update_planScope: mutable string = ""
+        description: "Typed update intent: optional scope hint (Recipient/RecipientAccount/RecipientLead...). Usually inferred from the field's data graph object. Cleared by note_email_request."
+
+    base_update_planMatchType: mutable string = ""
+        description: "Typed update intent: optional match type override. Normally derived from the values. Cleared by note_email_request."
 
     base_build_attempted: mutable boolean = False
         description: "Deterministic, not LLM-set. True once the automatic pipeline has called Build Dynamic Email for the CURRENT plan -- prevents re-building every turn. Reset by a fresh note_email_request call."
@@ -157,6 +199,9 @@ variables:
 
     base_build_contentKey: mutable string = ""
         description: "The REAL contentKey of the built email, if buildSuccess is True. Empty if nothing was built."
+
+    base_build_contentUrl: mutable string = ""
+        description: "Deep link to the CMS workspace holding the built/updated email, from Build/Update. Relayed in the success message so the user can open the result. Empty until a successful build/update."
 
     base_error_build: mutable string = ""
         description: "The REAL error message from Build Dynamic Email's last automatic call, if buildSuccess is False."
@@ -333,6 +378,19 @@ subagent plan:
                 errorMessage: string
             target: "apex://FindBrandAssetsAction"
 
+        get_asset_catalog_action:
+            description: "Returns the image-asset catalog for this build: the named brand's assets UNIONED with the org's stock image library, as one assetsJson. Used by the deterministic brand lookup in after_reasoning to feed base_brand_context -- so image elements (base AND dynamic-content variants) resolve by assetName across both brand and stock images. Not an LLM choice."
+            inputs:
+                brandName: string
+                    description: "The named brand (blank if none); its assets are unioned with stock."
+                includeStock: boolean
+                    description: "Union the org's 'Stock *' image library (default true)."
+            outputs:
+                assetsJson: string
+                    description: "JSON array of {name, urlName, contentKey, ...} = brand assets + stock images, deduped."
+                errorMessage: string
+            target: "apex://GetAssetCatalogAction"
+
         find_brand_record_action:
             description: "Search CMS brand records (colorScheme/typography + description/identity/tone voice) by name. Used by the deterministic brand lookup in after_reasoning -- not an LLM choice."
             inputs:
@@ -379,6 +437,9 @@ subagent plan:
                 elementsJson: string
                     description: "JSON array of assembled content elements. Bound to the assembled plan -- not LLM-filled."
                     is_required: True
+                assetsJson: string
+                    label: "Brand Assets"
+                    description: "The org's brand-asset catalog (the same list Find Brand Assets produced, held in base_brand_context). Bound to base_brand_context -- not LLM-filled. Build resolves each image element's real contentKey from its assetRole/assetName against this list, so the model never transcribes an MC-key."
                 includeBranding: boolean
                     description: "When true (default), wraps the elements with a logo/header banner and address/unsubscribe footer."
                 logoContentKeyOverride: string
@@ -411,6 +472,8 @@ subagent plan:
                 success: boolean
                     description: "Whether the whole call succeeded. If personalization was requested and failed, this is false even though the email was briefly created -- it's automatically rolled back (see rolledBack)."
                 contentKey: string
+                contentUrl: string
+                    description: "Deep link to the CMS workspace holding the built email -- relay it so the user can open the result."
                 managedContentId: object
                     complex_data_type_name: "lightning__textType"
                 blockIdsJson: string
@@ -422,6 +485,64 @@ subagent plan:
                 errorMessage: string
             target: "apex://BuildDynamicEmailAction"
 
+        read_dynamic_email_action:
+            label: "Read Dynamic Content Email"
+            description: "Reads an EXISTING CMS email by its content key and reports its real content: whether it has dynamic content, how many PersonalizationPoints, and its heading/paragraph/image blocks (with which are personalized). Use this to answer ANY question about an existing email, and BEFORE updating one -- never guess or describe an email's contents from its name alone. Read-only; creates nothing."
+            inputs:
+                contentKey: string
+                    label: "Email Content Key"
+                    description: "The content key (MC...) of the existing email to inspect."
+                    is_required: True
+            outputs:
+                found: boolean
+                title: string
+                isPersonalized: boolean
+                ppCount: integer
+                summary: string
+                    description: "A factual, human-readable summary of the email's dynamic content -- relay this VERBATIM; do not embellish or invent slot/field details."
+                blocksJson: string
+                    description: "JSON array of the email's heading/paragraph/image blocks with text/contentKey and which are personalized -- use to build matchText/matchContentKey targets for an update."
+                contentKey: string
+                    description: "Echo of the key that was read -- bound to base_update_readKey, which after_reasoning promotes to the update target when a change is also requested (no separate note_update_target call needed). A pure inspection never promotes it."
+                errorMessage: string
+            target: "apex://ReadDynamicEmailAction"
+
+        update_dynamic_email_action:
+            label: "Update Dynamic Content Email"
+            description: "Adds dynamic content personalization to an EXISTING CMS email, merging the new PersonalizationPoints/decisions/variants into whatever is already there. Targets existing blocks by their content (heading/paragraph text, or image contentKey). Preserves the email's copy, layout, and any existing dynamic content -- only operations/variants are extended. Use this when the user wants to add or change dynamic content on an email that is ALREADY built (identified by its content key), NOT to create a new email."
+            require_user_confirmation: True
+            inputs:
+                contentKey: string
+                    label: "Email Content Key"
+                    description: "The content key (MC...) of the EXISTING email to add dynamic content to."
+                    is_required: True
+                personalizationsJson: string
+                    description: "JSON array of PersonalizationPoint specs (same shape as Build Dynamic Email), EXCEPT each target identifies its existing block by content: matchText (exact heading/paragraph text) or matchContentKey (image contentKey), in addition to elementKey/blockDefinition/textByDecision. Bound to the assembled plan -- not LLM-filled with raw keys."
+                    is_required: True
+                assetsJson: string
+                    label: "Brand Assets"
+                    description: "The org's brand-asset catalog (base_brand_context). Resolves any image-swap variant's contentKey from an assetName/assetRole so the model never transcribes an MC-key. Bound to base_brand_context -- not LLM-filled."
+                dataSpaceName: string
+                    description: "Data Cloud data space (almost always 'default'). Bound to 'default'."
+                profileDataGraphName: string
+                    label: "Data Graph"
+                    description: "The data graph the new decisions evaluate against. Bound to the resolved graph name -- not LLM-filled."
+                personalizationSummary: string
+                    label: "Personalization"
+                    description: "Display-only, shown on the confirm dialog for review: a short human summary of the dynamic content being added. Not used by the update."
+                targetSlotsJson: string
+                    label: "Target Slots"
+                    description: "JSON array of the existing SLOT numbers to personalize, in the same order as the axes (from set_update_slots). The deterministic block identity -- slot N is the Nth content block Read numbered. Bound to base_update_slotBindingsJson."
+            outputs:
+                success: boolean
+                contentKey: string
+                contentUrl: string
+                    description: "Deep link to the CMS workspace holding the updated email -- relay it so the user can open the result."
+                ppName: string
+                variantIdsJson: string
+                errorMessage: string
+            target: "apex://UpdateDynamicEmailAction"
+
         plan_email_structure_action:
             description: "Decides email structure (content slots and personalization needs) from a plain-language request, without writing any final copy. Creates nothing, makes no changes."
             inputs:
@@ -429,7 +550,7 @@ subagent plan:
                     description: "Plain-language description of what the email should contain and, if applicable, how it should be personalized. Use the user's own request -- don't paraphrase away specifics they gave you."
                     is_required: True
                 "Input:BrandContext": string
-                    description: "Brand asset name-to-contentKey pairs already discovered. Omit if none found -- never fabricate this."
+                    description: "Brand asset name-to-contentKey pairs already discovered, plus the brand's voice (description/identity/tone) when a brand record was found -- so the plan is voice-aware. Omit if none found -- never fabricate this."
                 "Input:DataGraphContext": string
                     description: "Confirmed data-graph field API names available for personalization. Omit if none confirmed -- never fabricate this."
             outputs:
@@ -437,6 +558,55 @@ subagent plan:
                     description: "JSON: titleGoal/subjectLineGoal/preheaderGoal, slots[] (key/type/goal -- image slots also carry contentKey/altText/widthPercent, button slots also carry linkGoal), personalizations[] (name/label/fieldApiName/scope/matchType/value/values/appliesToSlots). Contains no final copy -- goals/descriptions only."
                 generationId: string
             target: "prompt://AuraPoc_PlanEmailStructureV2"
+
+        plan_email_update_action:
+            description: "Internal deterministic step -- runs AUTOMATICALLY in after_reasoning for an update; the agent NEVER calls it directly (inputs are bound to the read blocks + typed intent). Decides the real-slot update structure. Creates nothing, makes no changes."
+            inputs:
+                emailBlocksJson: string
+                    description: "The existing email's numbered blocks from Read Dynamic Email ([{slot,id,def,text,personalized}]). Bound to base_update_emailBlocks."
+                planSlotsJson: string
+                    description: "JSON array of target slot numbers from note_update_plan (e.g. [3]). Bound to base_update_planSlotsJson."
+                planField: string
+                    description: "Personalization field in natural words (e.g. 'industry'). Bound to base_update_planField."
+                planValuesJson: string
+                    description: "JSON array of values -- one variant each (e.g. Technology/Healthcare/Finance). Bound to base_update_planValuesJson."
+                planScope: string
+                    description: "Optional scope hint. Bound to base_update_planScope."
+                planMatchType: string
+                    description: "Optional match-type override. Bound to base_update_planMatchType."
+                fieldsJson: string
+                    description: "The data-graph field catalog. Bound to base_data_fieldsJson."
+                userIntent: string
+                    description: "The request text -- fallback when the typed intent is missing. Bound to base_content_userIntent."
+            outputs:
+                success: boolean
+                structurePlanJson: string
+                    description: "The real-slot structure plan (same shape as Plan Email Structure), constrained to the existing email's blocks. Bound to base_content_structurePlanJson."
+                errorMessage: string
+                    description: "Fail-loud reason (blocks missing / slot ineligible / field not in graph). Empty on success."
+                planNote: string
+                    description: "How slot/field were resolved or degraded. Empty when nothing to note."
+            target: "apex://PlanEmailUpdateAction"
+
+        expand_update_plan_slots_action:
+            description: "Internal deterministic UPDATE step -- runs AUTOMATICALLY in after_reasoning after the plan and before copy is filled; the agent NEVER calls it. Expands a personalization flagged applyToAllEligible across every eligible existing slot (adds the real slot numbers). No changes, no callout."
+            inputs:
+                structurePlanJson: string
+                    description: "The structure plan just produced. Bound to base_content_structurePlanJson."
+                    is_required: True
+                emailBlocksJson: string
+                    description: "The existing email's blocks. Bound to base_update_emailBlocks."
+                updateTargetKey: string
+                    description: "The existing email's content key, for a self-heal re-read if the blocks did not arrive. Bound to base_update_targetKey."
+                userIntent: string
+                    description: "The request text -- lets the step detect an 'all/every/each eligible slot' intent and remap deterministically. Bound to base_content_userIntent."
+            outputs:
+                success: boolean
+                expandedPlanJson: string
+                    description: "The plan with any applyToAllEligible axis expanded across all eligible slots. Bind base_content_structurePlanJson to this. Equals the input when nothing was flagged."
+                note: string
+                    description: "Human note of what was expanded. Empty when nothing changed."
+            target: "apex://ExpandUpdatePlanSlotsAction"
 
         fill_copy_action:
             description: "Deterministically fills every email copy cell (each slot's default plus one variant per personalization decision) with a narrow per-cell LLM call, guaranteeing complete coverage. Returns the copyJson Assemble Content Plan expects. Replaces the monolithic Write Email Copy step -- coverage is guaranteed by the loop, not the model. Creates nothing."
@@ -473,6 +643,10 @@ subagent plan:
                     description: "0 = none configured (degrade to plain), 1 = resolved, >1 = ambiguous."
                 availableGraphNamesJson: string
                     description: "Graph names to offer the user when a choice is needed."
+                emailBlocksJson: string
+                    description: "UPDATE mode: the existing email's numbered content blocks (from Read). When present, Assemble derives the slot bindings itself. Empty for a new build."
+                updateTargetKey: string
+                    description: "UPDATE mode: the existing email's content key (base_update_targetKey). Lets Assemble fail loud if an update reaches it without blocks, instead of silently emitting empty bindings. Empty for a new build."
             outputs:
                 success: boolean
                 title: string
@@ -484,6 +658,8 @@ subagent plan:
                     description: "JSON array of content elements, ready for Build Dynamic Email."
                 personalizationsJson: string
                     description: "JSON array of {ppName, ppLabel, decisionsJson, targetsJson} -- one entry per independent personalization axis, ready for Build Dynamic Email. Omitted when the structure plan had no personalizations (or all were dropped by the data-graph gate)."
+                slotBindingsJson: string
+                    description: "UPDATE mode: derived {elementKey, slot} bindings for each surviving axis (Assemble matches each to an eligible existing slot; over-planned axes are dropped). Bound to base_update_slotBindingsJson. '[]' for a new build."
                 personalizationNote: string
                     description: "Human-readable note about any personalization dropped or degraded -- show verbatim in the summary."
                 needsGraphChoice: boolean
@@ -505,6 +681,22 @@ subagent plan:
                     description: "The data graph resolved this session (blank if none) -- a personalized plan with no resolved graph is invalid."
                 availableFieldsJson: string
                     description: "Flattened field catalog for the resolved graph, for field-existence backstop checks."
+                workspaceId: string
+                    description: "Resolved CMS workspace id -- required; validation flags it blank."
+                title: string
+                    description: "Assembled title -- required; validation flags it blank."
+                subjectLine: string
+                    description: "Assembled subject line -- required; validation flags it blank."
+                preheader: string
+                    description: "Assembled preheader -- required; validation flags it blank."
+                urlName: string
+                    description: "Assembled URL slug -- required; validation flags it blank."
+                emailBlocksJson: string
+                    description: "UPDATE mode: the existing email's numbered content blocks (from Read). Enables plan-time slot validation. Empty for a new build."
+                targetSlotsJson: string
+                    description: "UPDATE mode: the {elementKey, slot} bindings. Validated against emailBlocksJson so a bad slot is caught before approval. Empty for a new build."
+                updateTargetKey: string
+                    description: "UPDATE mode signal: the content key of the email being updated. When set with personalization, validation REQUIRES the read blocks and slot bindings. Empty for a new build."
             outputs:
                 isValid: boolean
                 issuesJson: string
@@ -532,6 +724,8 @@ subagent plan:
                     description: "Human-readable summary of the committed branding, for the pre-approval summary."
                 workspaceError: string
                     description: "Non-empty ONLY when no CMS workspace could be resolved -- an actionable, build-blocking reason. Drives a fail-fast stall."
+                planBrandContext: string
+                    description: "Asset context folded with the brand voice prose (description/identity/tone). Bound to Plan's BrandContext so the plan is voice-aware; equals the asset context alone when no brand voice exists."
             target: "apex://ResolveBrandingAction"
 
         auth_diagnostic_action:
@@ -546,6 +740,8 @@ subagent plan:
                     complex_data_type_name: "lightning__integerType"
                 workspacesJson: string
                     description: "JSON array of {id, name, apiName} for each email-capable Marketing CMS workspace found."
+                recommendedWorkspaceId: string
+                    description: "The workspace to auto-pin on recovery (Default_Content_Workspace else first-by-name); empty if auth failed or none found."
                 diagnostic: string
                     description: "Human-readable result and, on failure, the exact ECA/JWT/workspace setup step to fix."
             target: "apex://AuthDiagnosticAction"
@@ -576,6 +772,13 @@ subagent plan:
                 set @variables.base_data_availableGraphNames = @outputs.availableGraphNamesJson
                 set @variables.base_data_resolvedGraphApiName = @outputs.resolvedGraphApiName
 
+        # Mark hydrated ONLY when the data-graph fetch actually returned a field catalog. Confirmed
+        # live: a transient empty return on the FIRST turn used to flip base_data_hydrated=True anyway,
+        # freezing base_data_fieldsJson empty for the whole session -> every personalization dropped at
+        # assemble ("field catalog could not be loaded") -> silent stall, no confirm. Gating the flag on
+        # a non-empty catalog lets the next turn retry until the fetch succeeds (the org's graph is fine;
+        # only the one early call flaked). base_data_graphContext duplicates fieldsJson so both are set.
+        if @variables.base_data_fieldsJson != "" and @variables.base_data_fieldsJson != "[]":
             set @variables.base_data_hydrated = True
 
     reasoning:
@@ -591,7 +794,96 @@ subagent plan:
 
             | You are the dynamic-content email builder. You fill the plan variables
               (structure, copy, data graph, branding), show the user a summary, get their
-              EXPLICIT approval, and only then build. You never build without explicit
+              EXPLICIT approval, and only then build.
+
+              EXISTING EMAILS -- NEVER GUESS: if the user asks about an EXISTING email (does it
+              have dynamic content, what are its slots, what's in it) or names an email to UPDATE,
+              you MUST call read_dynamic_email_tool with that email's content key and relay its
+              summary VERBATIM. Do NOT describe an email's slots, copy, personalization, or fields
+              from its name or from memory -- if you have not read it this turn, you do not know its
+              contents. If you don't have the content key, ask the user for it (or confirm which
+              email) before answering. This is a hard rule: a plausible-sounding but invented
+              summary is worse than asking.
+
+              *** UNDERSTANDING GATE (Feature 1 -- a cheap read-back BEFORE spending planning/copy) ***
+              After you capture a NEW content request (note_email_request) and before you show the
+              full plan summary, read the request back in ONE short line and ask the user to confirm:
+              "Here's what I understood -- <brand, if any>; <the personalization intent, e.g. personalize
+              the body by industry: Healthcare, Technology, Finance>. Correct?" Offer these as plain
+              options on their own lines:
+                - Yes, that's correct
+                - No, let me fix that
+              MANDATORY FIRE ON UNDERSTANDING CONFIRM: once you have shown that read-back, if the user's
+              next message affirms it (yes / correct / right / that's it), your VERY NEXT action MUST be
+              to call {!@actions.confirm_understanding_tool} with understandingOk = true. Re-showing the
+              read-back, or saying "great" WITHOUT calling it, is a FAILURE -- the gate never latches.
+              After calling it, continue to draft/show the plan. If they say it's wrong, re-capture with
+              note_email_request (which clears the gate) and read back again.
+              SKIP this gate -- go straight to planning -- ONLY when the user's opening message ALREADY
+              stated the specifics (what to personalize + by which field/values, or a clear one-shot);
+              a specific request should not be forced through a separate confirm turn. When skipping,
+              still set understandingOk (call confirm_understanding_tool with true) so the downstream
+              gate is satisfied.
+
+              *** DRAFT-STATUS READOUT (Feature 1 -- make "what's missing" obvious) ***
+              Whenever the user asks "show draft" / "what's left" / "status", or after you capture an
+              aspect mid-gather, show the itemized draft, marking each aspect present (with its value)
+              or missing:
+                Draft so far:
+                - Intent: <base_content_userIntent, or "not set">
+                - Data graph: <base_data_resolvedGraphApiName, or "not set">
+                - Target: <the email being updated (base_update_targetKey) or "new email">
+                - Personalization: <what base_content_planSummary covers, or "not planned yet">
+              Then name the next thing you still need in one plain line ("Still needed: <X>. What should
+              it be?"). This turns a vague stall into a clear ask. Never mark an OPTIONAL aspect as set
+              when the user hasn't given it.
+
+              ADD DC TO AN EXISTING EMAIL = UPDATE, NOT BUILD: when the user wants to ADD or CHANGE
+              dynamic content on an email that ALREADY EXISTS (they gave a content key, or asked to
+              update/personalize an email you just read):
+              FIRST, if you have not already read this email THIS turn, call
+              {!@actions.read_dynamic_email_tool} with its content key. Its summary lists each
+              existing block as a numbered SLOT (e.g. "slot 3 heading, slot 4 paragraph, slot 5
+              paragraph, slot 6 button") and marks any that are already personalized. You personalize
+              EXISTING blocks BY SLOT NUMBER -- you do not invent blocks or text.
+              SCOPE -- two things are OFF LIMITS for an update:
+              (a) A block that does NOT exist (a NEW slot). If the user asks to personalize something
+                  this email doesn't have, do NOT fail silently -- tell them which slots it DOES have
+                  and offer to REBUILD the email with the new block instead (a new block is a rebuild,
+                  via the build path, not an update).
+              (b) A slot that is ALREADY personalized (Read marks these). Editing existing dynamic
+                  content is not supported yet -- say so and offer a different, non-personalized slot.
+              ONLY WHAT WAS ASKED: describe EXACTLY the personalization the user requested and no more.
+              SLOT CHOICE (prune-then-choose): from the blocks you read, the ELIGIBLE slots are the
+              ones that are NOT images and NOT already personalized (i.e. free heading/paragraph/button
+              slots).
+              - If the user NAMED a specific slot (e.g. "slot 3") and it is eligible, use it: proceed
+                straight to the two calls below with that slot number in the request text.
+              - If the user did NOT name a slot (e.g. "add industry personalization"), do NOT guess.
+                First LIST the eligible slots back to the user (their number + type + a short hint of
+                the current text) and ASK which one to personalize. Wait for their answer. Only after
+                they pick do you make the two calls below with the chosen slot number in the request.
+              - If the user named a slot that is an image or already personalized, tell them it's not
+                eligible and list the eligible ones to pick from instead.
+              *** MANDATORY CAPTURE BEFORE ANY UPDATE SUMMARY (hard rule) *** -- you MUST make these
+              two tool calls, and you must make them BEFORE you write ANY plan/update summary or ask
+              the user to approve. Do NOT describe, summarize, or list the planned update until both
+              calls have been made this turn. A summary shown without these calls is a FAILURE: the
+              deterministic pipeline never runs, and the update silently stalls. The calls:
+              (1) call {!@actions.note_email_request} with the DC request VERBATIM, described in terms
+                  of the REAL slots you read and INCLUDING the chosen slot number (e.g. "add dynamic
+                  content to slot 3 by industry: Technology, Healthcare, Finance");
+              (2) call {!@actions.note_update_target} with the email's content key.
+              Only AFTER both calls may you present the summary the deterministic pipeline produced.
+              The pipeline (plan -> fill -> assemble -> validate) runs automatically once these two are
+              set; you do NOT hand-write the plan -- you capture the request and let it run.
+              That's it -- the pipeline reads-through the blocks you captured, derives the slot
+              bindings, validates, and offers update_dynamic_email_tool (merge into that email). The
+              build tool is not even offered while a target is set, so an existing email can never be
+              silently replaced by a new one. For a brand-NEW email, call ONLY note_email_request (no
+              target) so the build tool is offered.
+
+              You never build without explicit
               approval -- build_dynamic_email_tool is not even available until approval is
               recorded (via confirm_plan_tool).
 
@@ -608,9 +900,19 @@ subagent plan:
               a real failure and stopped. Do not describe any plan as built or ready.
               Respond with exactly this and nothing else: &quot;The build stopped because
               of a real error: {!@variables.base_error_pipeline}. Would you like
-              to revise the plan, or try a different approach?&quot; Calling
-              {!@actions.note_email_request} again for a revised request resets
-              the pipeline and clears the stall.
+              to revise the plan, or try a different approach?&quot;
+              MANDATORY RECOVERY CONTRACT -- when the user then gives a revision (e.g.
+              &quot;use only Manufacturing, High Tech, Financial Services&quot;), you MUST
+              call {!@actions.note_email_request} with the FULL revised request FIRST,
+              in that same turn, BEFORE you show any summary. This is the ONLY thing that
+              feeds the new request into the pipeline (it re-plans, re-fills, re-assembles,
+              re-validates and clears the stall). Do NOT paraphrase a new summary from the
+              old plan without calling it -- a summary you narrate without
+              note_email_request is stale and the update/build tool will stay unavailable.
+              And NEVER call {!@actions.confirm_plan_tool} while
+              {!@variables.base_content_validated} is False: an unvalidated plan cannot be
+              approved -- re-plan (note_email_request) until it validates, THEN show the
+              summary and only then accept approval.
               EXCEPTION -- setup/connection problems: if the stall is about
               authentication, credentials, a token, or a missing CMS workspace (i.e.
               {!@variables.base_error_pipeline} mentions auth/JWT/workspace), OR the user
@@ -621,12 +923,23 @@ subagent plan:
               {!@actions.note_workspace_override} with it and then
               {!@actions.note_email_request} with their original request to re-run.
 
+              NEVER CLAIM SUCCESS WITHOUT A REAL BUILD: only say an email was built/updated when
+              {!@variables.base_build_attempted} is True AND {!@variables.base_build_success} is True.
+              If base_build_attempted is False, NOTHING has been built this turn -- do NOT say
+              "build succeeded", do NOT return a content key or link. If the user asks for status
+              before a build ran, say the plan is ready for approval (or, if stalled, report the
+              stall) -- never fabricate a success. base_build_success/contentKey/contentUrl are set
+              ONLY by the build/update tool; if you did not just call it, they are not yours to report.
+
               ALREADY BUILT: if {!@variables.base_build_attempted} is True, the email was
               already created this session -- do NOT re-plan, do NOT re-show the summary,
               and do NOT call confirm/build again. Report the outcome using exactly one
               pattern and nothing else:
               - If {!@variables.base_build_success} is True: &quot;Built successfully. Content
-                Key: {!@variables.base_build_contentKey}.&quot; Then, ONLY if
+                Key: {!@variables.base_build_contentKey}.&quot; Then, if
+                {!@variables.base_build_contentUrl} is non-empty, add a link on its own line:
+                &quot;Open it: {!@variables.base_build_contentUrl}&quot; (it opens the CMS workspace
+                where the email now lives). Then, ONLY if
                 {!@variables.base_build_personalized} is False on a plan that requested
                 personalization, add one plain sentence that it built WITHOUT
                 personalization and why (facts already in context only; never invent).
@@ -638,9 +951,26 @@ subagent plan:
               for a brand change) to start fresh -- that resets base_build_attempted and
               begins a new plan. Otherwise just report the outcome above and stop.
 
+              *** NO SILENT STALL -- STALL GUARD BEFORE ANY CONFIRM (hard rule) ***
+              BEFORE you show a plan summary, offer approval, or call confirm_plan_tool, CHECK:
+              if {!@variables.base_error_stalled} is True OR {!@variables.base_content_validated}
+              is False, the plan did NOT pass -- you are NOT at the confirm step. Do NOT show a
+              &quot;here's what will be built/updated&quot; summary, do NOT list &quot;approve / change&quot;,
+              do NOT call confirm_plan_tool. Instead report the stall reason
+              ({!@variables.base_error_pipeline}, else {!@variables.base_error_issuesJson}) using the
+              stall-report wording above, and invite a revise. A plan that has not validated can never
+              be approved -- surfacing a confirm for it is the silent-stall bug and is forbidden.
+              NO-PLAN, NO-SUMMARY (hard rule): the ONLY personalization summary you may show is
+              {!@variables.base_content_planSummary} copied VERBATIM. If it is empty, there is NO plan
+              to summarize -- do NOT present a &quot;here's what will be updated/built&quot; summary, do NOT
+              offer approve/change, and NEVER narrate that an update &quot;is being applied&quot; or
+              &quot;approved.&quot; Instead, state in ONE line the specific values/mappings you still need
+              (e.g. which value maps to which image/variant) and stop. Narrating progress or a summary
+              without a non-empty planSummary is the hallucinated-progress bug and is forbidden.
+
               CONFIRM &amp; BUILD: once the plan is assembled (base_content_elementsJson is
-              non-empty), validated, and branded, and no change is pending, you are at
-              the confirm step.
+              non-empty), validated (base_content_validated True), branded, NOT stalled
+              (base_error_stalled False), and no change is pending, you are at the confirm step.
               APPROVAL TAKES PRIORITY -- CRITICAL: if the user's CURRENT message is an
               approval (yes / approved / looks good / proceed / go / build it / do it) and
               the plan is ready (base_content_elementsJson non-empty, validated, branded)
@@ -691,10 +1021,17 @@ subagent plan:
               When the user EXPLICITLY approves the summary (yes / approved / looks good /
               proceed / build it), do BOTH of these in the SAME turn, in order:
               (1) call {!@actions.confirm_plan_tool} with planApproved = true (records the
-                  approval and makes build_dynamic_email_tool available), then
-              (2) call {!@actions.build_dynamic_email_tool}, filling its open inputs by
-                  copying the EXACT assembled values -- do NOT paraphrase, shorten, or add
-                  merge tokens:
+                  approval and makes the build/update tool available), then
+              (2) call the RIGHT tool for the request:
+                  - If {!@variables.base_update_targetKey} is set (adding DC to an EXISTING
+                    email), call {!@actions.update_dynamic_email_tool}. It merges the new
+                    personalization into that existing email -- it does NOT create a new one.
+                    Fill only its display-only personalizationSummary = copy
+                    {!@variables.base_content_planSummary} VERBATIM; contentKey, personalizations,
+                    assets and data graph are filled automatically -- never type those.
+                  - Otherwise (a NEW email), call {!@actions.build_dynamic_email_tool}, filling
+                    its open inputs by copying the EXACT assembled values -- do NOT paraphrase,
+                    shorten, or add merge tokens:
                     title = {!@variables.base_content_title}
                     brandingSummary = copy {!@variables.base_brand_note} VERBATIM (it names
                       the brand and its resolved logo/header/record).
@@ -711,12 +1048,40 @@ subagent plan:
                   (shown on the confirm dialog for review; they do not change what is built).
                   Every other input (includeBranding, urlName, content, branding keys, data
                   graph) is filled automatically from the assembled plan -- never type those.
+                  Only ONE of build/update is ever available (they are mutually exclusive on
+                  base_update_targetKey), so there is no ambiguity about which to call.
               Calling the build tool raises the native Approve/Cancel dialog (its
               require_user_confirmation), which shows the email name, subject, preheader,
               branding, personalization and validation for a final check -- THAT dialog is
               the final gate;
               the email is created only when the user clicks Approve. Never narrate a text
               confirmation instead of calling the build tool.
+
+              *** MANDATORY FIRE ON APPROVAL (hard rule, applies to BOTH build AND update) ***
+              When the user approves and the plan is ready (base_content_validated == True,
+              base_content_elementsJson non-empty, and for an update base_update_targetKey set
+              with base_update_slotBindingsJson non-empty) and base_build_attempted == False,
+              you MUST call the tool -- update_dynamic_email_tool for an update, or
+              build_dynamic_email_tool for a new email -- THIS TURN. Saying &quot;approved&quot;,
+              &quot;proceeding&quot;, &quot;the update will be applied&quot;, or any similar text WITHOUT
+              calling the tool is a FAILURE: nothing is built or merged, the change silently does
+              not happen. The tool call itself raises the confirm dialog -- that IS how the user
+              confirms; do not substitute a prose &quot;are you sure?&quot;. If you have already recorded
+              approval (confirm_plan_tool) this turn, the very next action MUST be the build/update
+              tool -- not a message. Do not end your turn on an approval without having called it.
+              (By the time you reach this point base_content_understandingOk is already True -- the
+              understanding read-back happens before the plan summary. If it is somehow still False,
+              do the read-back + confirm_understanding_tool first, then continue -- do not skip it.)
+
+              *** SUMMARIZE ONLY WHAT WILL ACTUALLY HAPPEN (honesty rule) ***
+              Your plan summary MUST reflect the DETERMINISTIC outcome, not your own idea of the
+              plan. Use base_content_planSummary VERBATIM for the personalization -- it lists only
+              the axes/slots that ACTUALLY bound. If the user asked to personalize a slot that is an
+              image or already personalized (ineligible), that slot is SILENTLY DROPPED by the
+              pipeline -- so do NOT tell the user it &quot;will be personalized&quot;. Instead say plainly
+              which requested slot(s) could not be personalized and why (image / already personalized),
+              and describe only the slots that base_content_planSummary / base_update_slotBindingsJson
+              actually cover. Never promise personalization on a slot that is not in the bound set.
 
               To draft (or re-draft) a plan, work through this checklist, in order.
               Never decide these unilaterally -- confirm with the user, but never block
@@ -800,6 +1165,14 @@ subagent plan:
               the plan is built with the brand's assets and voice already resolved).
               Confirmed live that leaving any of these to LLM discretion produced a
               plausible summary with nothing actually built -- so you never call them.
+              This includes the planners: NEVER call {!@actions.plan_email_structure_action}
+              or {!@actions.plan_email_update_action} yourself -- they run automatically
+              after_reasoning, bound to the captured intent + the read blocks. Calling
+              plan_email_update_action directly (with no bound emailBlocks) trips its
+              "no existing email blocks were read" fail-loud even though the blocks WERE
+              read. For an UPDATE your only calls are: read_dynamic_email_tool, then
+              note_update_target (the email key) + note_update_plan (the typed slot/field/
+              values), then confirm_plan_tool on approval. The update planner does the rest.
               Once the pipeline finishes and the plan is assembled/validated/branded,
               show the CONFIRM &amp; BUILD summary (above) and wait -- on the user's
               explicit approval, call confirm_plan_tool then build_dynamic_email_tool
@@ -814,6 +1187,10 @@ subagent plan:
                 description: "Record whether the user EXPLICITLY approved the plan summary you just showed. Set planApproved to true when they clearly say yes / approved / looks good / proceed / build it. Only after this is build_dynamic_email_tool available. If the user wants a change, re-plan instead."
                 with base_content_planApproved = ...
 
+            confirm_understanding_tool: @utils.setVariables
+                description: "Record that the user confirmed your READ-BACK of the brand + main intent is correct (the soft understanding gate). Set understandingOk to true when they affirm (yes / correct / right / that's it). This does NOT build anything -- it only unlocks the plan/confirm flow. If they say it's wrong, re-capture the request with note_email_request instead (which clears this)."
+                with base_content_understandingOk = ...
+
             build_dynamic_email_tool: @actions.build_dynamic_email_action_v2
                 with contentSpaceOrFolderId = @variables.base_brand_workspaceId
                 with title = ...
@@ -822,6 +1199,7 @@ subagent plan:
                 with subjectLine = ...
                 with preheader = ...
                 with elementsJson = @variables.base_content_elementsJson
+                with assetsJson = @variables.base_brand_context
                 with includeBranding = @variables.base_brand_include
                 with logoContentKeyOverride = @variables.base_brand_logoKey
                 with headerContentKeyOverride = @variables.base_brand_headerKey
@@ -836,9 +1214,39 @@ subagent plan:
                 set @variables.base_build_success = @outputs.success
                 set @variables.base_build_personalized = @outputs.personalized
                 set @variables.base_build_contentKey = @outputs.contentKey
+                set @variables.base_build_contentUrl = @outputs.contentUrl
                 set @variables.base_error_build = @outputs.errorMessage
                 set @variables.base_build_attempted = True
-                available when @variables.base_content_planApproved == True and @variables.base_content_validated == True and @variables.base_brand_resolved == True and @variables.base_brand_workspaceId != "" and @variables.base_data_needsGraphChoice == False and @variables.base_content_elementsJson != "" and @variables.base_build_attempted == False
+                available when @variables.base_content_planApproved == True and @variables.base_content_validated == True and @variables.base_brand_resolved == True and @variables.base_brand_workspaceId != "" and @variables.base_data_needsGraphChoice == False and @variables.base_content_elementsJson != "" and @variables.base_content_title != "" and @variables.base_content_subjectLine != "" and @variables.base_content_preheader != "" and @variables.base_content_urlName != "" and @variables.base_build_attempted == False and @variables.base_update_targetKey == ""
+
+            # READ an existing email's real content before answering about it or updating it. Safe,
+            # read-only, no plan gate -- available whenever the user asks about an existing email or
+            # names one to update. The agent MUST call this instead of describing an email from its
+            # name; relay the returned summary verbatim.
+            read_dynamic_email_tool: @actions.read_dynamic_email_action
+                with contentKey = ...
+                set @variables.base_update_emailBlocks = @outputs.blocksJson
+                set @variables.base_update_readKey = @outputs.contentKey
+
+            # ADD dynamic content to an email that ALREADY EXISTS (identified by its content key),
+            # merging into any existing DC rather than creating a new email. Distinct from
+            # build_dynamic_email_tool (which creates). The LLM supplies the target contentKey and a
+            # personalizationsJson whose targets identify existing blocks by matchText/matchContentKey;
+            # assets/graph bind deterministically. Gated on the same plan-approval as build.
+            update_dynamic_email_tool: @actions.update_dynamic_email_action
+                with contentKey = @variables.base_update_targetKey
+                with personalizationsJson = @variables.base_content_personalizationsJson
+                with targetSlotsJson = @variables.base_update_slotBindingsJson
+                with assetsJson = @variables.base_brand_context
+                with dataSpaceName = "default"
+                with profileDataGraphName = @variables.base_data_resolvedGraphApiName
+                with personalizationSummary = ...
+                set @variables.base_build_success = @outputs.success
+                set @variables.base_build_contentKey = @outputs.contentKey
+                set @variables.base_build_contentUrl = @outputs.contentUrl
+                set @variables.base_error_build = @outputs.errorMessage
+                set @variables.base_build_attempted = True
+                available when @variables.base_content_planApproved == True and @variables.base_content_validated == True and @variables.base_data_needsGraphChoice == False and @variables.base_content_personalizationsJson != "" and @variables.base_content_personalizationsJson != "[]" and @variables.base_build_attempted == False and @variables.base_update_targetKey != ""
 
             lookup_email_context: @subagent.email_context
                 description: "Look up confirmed data-graph fields (for the multi-graph choice case) before drafting an email. Not for brand assets -- use note_requested_brand for that."
@@ -855,10 +1263,39 @@ subagent plan:
                 description: "Record a specific CMS workspace id the USER explicitly provides (e.g. from test_connection's list, or one they paste) to PIN it for the build. Call ONLY with an id the user actually gave -- never invent or guess one. A deterministic step then uses it. To clear a prior pin, set it to an empty string."
                 with base_brand_workspaceOverride = ...
 
+            # Deterministically routes build-vs-update. Call this whenever the user names an
+            # EXISTING email (by content key) to ADD dynamic content to -- set the key here; the
+            # confirm step then offers UPDATE (merge into that email), never BUILD (new email).
+            # For a brand-new email, set it EMPTY (the default) so BUILD is offered. This is the
+            # ONLY thing that decides update-vs-build -- the gates key off base_update_targetKey,
+            # not the LLM's choice, so "add DC to email X" can never silently create a new email.
+            note_update_target: @utils.setVariables
+                description: "Record the content key (MC...) of an EXISTING email to ADD/CHANGE dynamic content on -- an update, not a new email. Call whenever the user names an existing email to personalize (e.g. 'add DC to MC...'). Leave unset for a brand-new email. Routes build vs update deterministically -- set it before the plan is approved."
+                with base_update_targetKey = ...
+                # Deliberately does NOT clear blocks/plan-intent: blocks are overwritten by the read,
+                # plan intent by note_update_plan. Clearing here would wipe the read blocks on a
+                # follow-up turn (e.g. "use slot 8") and re-stall validation. Stale blocks from a
+                # different email are self-correcting -- the slot type/range guards reject a mismatch.
+
+            # Records the TYPED update intent so a DETERMINISTIC planner (Plan Email Update) can build a
+            # real-slot plan. The agent NEVER authors the plan JSON or picks fieldApiNames -- it just
+            # extracts what the user said into typed slots/field/values. This is the update analogue of
+            # note_email_request (which starts a build plan). Call it for an UPDATE once you know, from
+            # the numbered Read, which existing slot(s) to personalize and by what field/values. If a
+            # value is unclear, leave it and the planner falls back to the request text.
+            note_update_plan: @utils.setVariables
+                description: "Record the typed intent for adding dynamic content to an EXISTING email: the target slot NUMBER(s) you read (e.g. [3]), the personalization field in natural words (e.g. 'industry'), and the values (e.g. Technology, Healthcare, Finance -- one variant each). A deterministic planner turns this into a real-slot plan; you never pick fieldApiNames or bind slots. Do NOT call for a brand-new email."
+                with base_update_planSlotsJson = ...
+                with base_update_planField = ...
+                with base_update_planValuesJson = ...
+                with base_update_planScope = ...
+                with base_update_planMatchType = ...
+
             note_email_request: @utils.setVariables
-                description: "Record the user's email request VERBATIM (their exact words, not a paraphrase) whenever they ask for a NEW email or a CHANGE to the current one. This is the ONLY drafting call you make -- a deterministic pipeline then plans the structure, writes per-cell copy, assembles, validates, and commits branding automatically. Setting it starts a fresh plan (clears any prior draft and its approval)."
+                description: "Record the user's email request VERBATIM (their exact words, not a paraphrase) whenever they ask for a NEW email or a CHANGE to the current one. This is the ONLY drafting call you make -- a deterministic pipeline then plans the structure, writes per-cell copy, assembles, validates, and commits branding automatically. Setting it starts a fresh plan (clears any prior draft and its approval). Does NOT change the update target -- set that separately with note_update_target."
                 with base_content_userIntent = ...
                 set @variables.base_content_structurePlanJson = ""
+                set @variables.base_update_structurePlanJson = ""
                 set @variables.base_content_copyJson = ""
                 set @variables.base_content_elementsJson = ""
                 set @variables.base_content_urlName = ""
@@ -872,12 +1309,31 @@ subagent plan:
                 set @variables.base_data_graphChoiceMessage = ""
                 set @variables.base_brand_resolved = False
                 set @variables.base_content_planApproved = False
+                set @variables.base_content_understandingOk = False
                 set @variables.base_content_planSummary = ""
                 set @variables.base_build_attempted = False
                 set @variables.base_build_success = False
                 set @variables.base_build_personalized = False
                 set @variables.base_build_contentKey = ""
                 set @variables.base_error_build = ""
+                set @variables.base_error_workspace = ""
+                set @variables.base_content_recommendedWorkspace = ""
+                set @variables.base_error_recoveryTried = False
+                # CLEAR the typed update PLAN intent -- a fresh/revised request must re-capture which
+                # slot/field/values to personalize (via note_update_plan), never silently reuse the
+                # prior one (e.g. "use Manufacturing instead"). The request-text fallback in Plan Email
+                # Update still covers a prose revision where note_update_plan isn't re-called.
+                set @variables.base_update_planSlotsJson = ""
+                set @variables.base_update_planField = ""
+                set @variables.base_update_planValuesJson = "[]"
+                set @variables.base_update_planScope = ""
+                set @variables.base_update_planMatchType = ""
+                # NOTE: does NOT clear the update TARGET/BLOCKS (target key + read blocks). Those
+                # describe WHICH existing email, are set by note_update_target / the read, and must
+                # SURVIVE across the multi-turn update flow (read on turn 1, choose slot on a later
+                # turn). Clearing them here wiped the read blocks between read and validation, which
+                # stalled the plan ("blocks not read") and suppressed the confirm button. The target is
+                # reset instead by note_update_target when the email changes.
 
             assemble_content_plan_tool: @actions.assemble_content_plan_action_v2
                 with structurePlanJson = @variables.base_content_structurePlanJson
@@ -886,12 +1342,15 @@ subagent plan:
                 with availableFieldsJson = @variables.base_data_fieldsJson
                 with dataGraphCount = @variables.base_data_graphCount
                 with availableGraphNamesJson = @variables.base_data_availableGraphNames
+                with emailBlocksJson = @variables.base_update_emailBlocks
+                with updateTargetKey = @variables.base_update_targetKey
                 set @variables.base_content_title = @outputs.title
                 set @variables.base_content_subjectLine = @outputs.subjectLine
                 set @variables.base_content_preheader = @outputs.preheader
                 set @variables.base_content_urlName = @outputs.urlName
                 set @variables.base_content_elementsJson = @outputs.elementsJson
                 set @variables.base_content_personalizationsJson = @outputs.personalizationsJson
+                set @variables.base_update_slotBindingsJson = @outputs.slotBindingsJson
                 set @variables.base_content_personalizationNote = @outputs.personalizationNote
                 set @variables.base_content_planSummary = @outputs.planSummary
                 set @variables.base_data_needsGraphChoice = @outputs.needsGraphChoice
@@ -904,12 +1363,59 @@ subagent plan:
                 with personalizationsJson = @variables.base_content_personalizationsJson
                 with resolvedGraphApiName = @variables.base_data_resolvedGraphApiName
                 with availableFieldsJson = @variables.base_data_fieldsJson
+                with workspaceId = @variables.base_brand_workspaceId
+                with title = @variables.base_content_title
+                with subjectLine = @variables.base_content_subjectLine
+                with preheader = @variables.base_content_preheader
+                with urlName = @variables.base_content_urlName
+                with emailBlocksJson = @variables.base_update_emailBlocks
+                with targetSlotsJson = @variables.base_update_slotBindingsJson
+                with updateTargetKey = @variables.base_update_targetKey
                 set @variables.base_content_validated = @outputs.isValid
                 set @variables.base_error_issuesJson = @outputs.issuesJson
                 available when @variables.base_content_elementsJson != "" and @variables.base_data_needsGraphChoice == False
 
 
     after_reasoning:
+        # CLEAR the transient pipeline error/stall at the START of every turn, so it is RE-DERIVED
+        # from THIS turn's state rather than inheriting a stale latch. Confirmed live: base_error_stalled
+        # was set True on an earlier turn (e.g. an over-planned attempt), and because it was only ever
+        # reset by note_email_request, a follow-up turn with a perfectly clean assembled plan stayed
+        # stalled -- validate was skipped (gated on stalled==False), so validated stayed False and the
+        # confirm/update tool never became available (silent stall, no issues). The stall checks below
+        # re-set these deterministically if THIS turn actually hit a problem. base_content_validated is
+        # NOT cleared here -- it latches a real prior validation; a fresh plan clears it via note_email_request.
+        set @variables.base_error_stalled = False
+        set @variables.base_error_pipeline = ""
+
+        # RESET a FAILED build/update attempt at the START of the turn so a re-plan/retry can reopen
+        # the build+update gates (both require base_build_attempted == False). Confirmed live
+        # (session 01a0dbaa, 2026-09-25): an Apex guard failed the 1st update attempt (Industry axis
+        # had 15 decisions > 10 max), which set base_build_attempted = True. The user then said
+        # "revise the plan" but the LLM did NOT call note_email_request (the only other reset of this
+        # flag), so on the next approve the update tool was permanently unavailable
+        # ("update_dynamic_email_tool is not available in this environment"). This clears the flag
+        # deterministically whenever the last attempt FAILED (attempted==True, success==False, a real
+        # error present) -- a SUCCESSFUL build (success==True) still latches the gate closed so it
+        # never re-builds. Also clears the stale error so it does not linger into the retry summary.
+        if @variables.base_build_attempted == True and @variables.base_build_success == False and @variables.base_error_build != "":
+            set @variables.base_build_attempted = False
+            set @variables.base_error_build = ""
+
+        # DETERMINISTIC UPDATE-TARGET CAPTURE -- promote the last-read email's key to the update
+        # target when the user both READ an email and asked to personalize it, so we no longer
+        # depend on the LLM separately calling note_update_target. Confirmed live (session
+        # 01a0dbfa, 2026-09-26): the agent read the email and ran the whole plan pipeline but never
+        # called note_update_target, so base_update_targetKey stayed "" -- the UPDATE gate (needs it
+        # non-empty) AND the BUILD gate (needs workspace/title, unset for an existing email) were
+        # BOTH closed, so no tool fired and the agent falsely narrated "your approval is recorded".
+        # Promote only when: we have a read key, a content request is in play (userIntent set = the
+        # user asked for a change, not a pure inspection), and no target is set yet. A pure
+        # inspection (read with no note_email_request) leaves userIntent empty -> no promotion ->
+        # the build path is untouched. note_update_target still works and takes precedence.
+        if @variables.base_update_readKey != "" and @variables.base_content_userIntent != "" and @variables.base_update_targetKey == "":
+            set @variables.base_update_targetKey = @variables.base_update_readKey
+
         # Deterministic brand resolution FIRST -- before fill_copy, so the brand voice can shape
         # the copy. The LLM's only branding input is the brand NAME (base_brand_requestedName, via
         # note_requested_brand); Apex fetches the assets + record/voice here rather than relying on
@@ -917,9 +1423,12 @@ subagent plan:
         # (tracked by base_brand_lookedUpName) and forces a re-commit (base_brand_resolved=False).
         # No brand named -> skip; the branding commit below falls back to the org default by slug.
         if @variables.base_brand_requestedName != "" and @variables.base_brand_requestedName != @variables.base_brand_lookedUpName:
-            run @actions.find_brand_assets_action
-                with searchTerm = @variables.base_brand_requestedName
-                with maxResults = 25
+            # Asset catalog = the named brand's assets UNIONED with the org's stock image library,
+            # so image elements (base AND dynamic-content variants) can be placed by assetName across
+            # both brand and stock images and resolved deterministically to a real contentKey.
+            run @actions.get_asset_catalog_action
+                with brandName = @variables.base_brand_requestedName
+                with includeStock = True
                 set @variables.base_brand_context = @outputs.assetsJson
             run @actions.find_brand_record_action
                 with searchTerm = @variables.base_brand_requestedName
@@ -927,6 +1436,21 @@ subagent plan:
                 set @variables.base_brand_voice = @outputs.brandsJson
             set @variables.base_brand_lookedUpName = @variables.base_brand_requestedName
             set @variables.base_brand_resolved = False
+
+        # Brand-less asset catalog -- fetch the STOCK image library even when no brand was named, so
+        # the planner always has real assets to choose from for an IMAGE-SWAP personalization (image
+        # DC). Root cause of the "image slot missing a contentKey for each industry" stall: the only
+        # catalog fetch (above) is gated on a brand name, so a brand-less update left base_brand_context
+        # = "None available" -> the plan prompt's BrandContext was empty -> the LLM had no asset names to
+        # pick, so image variants resolved to nothing. GetAssetCatalog with brandName="" returns the
+        # org's stock images (verified). Gated on the catalog still being unfilled, so it fires at most
+        # once and NEVER overrides a brand-named fetch (which already set base_brand_context above).
+        # includeStock brings brand assets too when a brand later resolves via the default path.
+        if @variables.base_brand_context == "None available" and @variables.base_content_userIntent != "" and @variables.base_error_stalled == False:
+            run @actions.get_asset_catalog_action
+                with brandName = ""
+                with includeStock = True
+                set @variables.base_brand_context = @outputs.assetsJson
 
         # Deterministic branding commit -- MOVED AHEAD of Plan (was last) so the plan and the whole
         # pipeline run with branding already resolved, per the brand-before-plan ordering. Commits
@@ -951,13 +1475,30 @@ subagent plan:
                 set @variables.base_brand_note = @outputs.brandingNote
                 set @variables.base_brand_resolved = @outputs.brandingResolved
                 set @variables.base_error_workspace = @outputs.workspaceError
+                set @variables.base_brand_planContext = @outputs.planBrandContext
 
-        # Fail FAST on a missing CMS workspace -- no workspace means Build Dynamic Email cannot
-        # create anything, so stop here (before wasting the plan/copy LLM calls) and surface the
-        # actionable reason via the stall path, instead of drafting a whole plan and then hitting a
-        # cryptic missing-workspace error at build time. The build tool is also gated on a non-empty
-        # workspace (see build_dynamic_email_tool), so this can never slip through.
-        if @variables.base_brand_workspaceId == "" and @variables.base_content_userIntent != "" and @variables.base_error_stalled == False and @variables.base_data_needsGraphChoice == False:
+        # Missing CMS workspace -> AUTO-DIAGNOSE, then AUTO-RECOVER if possible, else fail fast.
+        # No workspace means Build Dynamic Email cannot create anything, so we never draft a plan we
+        # can't build. Step 1: run the auth/workspace self-check (mints the token, lists email-capable
+        # workspaces) and capture its richer diagnostic + a recommended workspace.
+        if @variables.base_brand_workspaceId == "" and @variables.base_update_targetKey == "" and @variables.base_content_userIntent != "" and @variables.base_error_stalled == False and @variables.base_data_needsGraphChoice == False:
+            run @actions.auth_diagnostic_action
+                with unused = ""
+                set @variables.base_error_workspace = @outputs.diagnostic
+                set @variables.base_content_recommendedWorkspace = @outputs.recommendedWorkspaceId
+
+        # Step 2 -- AUTO-RECOVER (once): auth works and a workspace exists (a transient miss), so pin
+        # the recommended workspace and fill it directly so THIS pass continues to plan/build. Guarded
+        # by base_error_recoveryTried so a second failure can't loop.
+        if @variables.base_brand_workspaceId == "" and @variables.base_update_targetKey == "" and @variables.base_content_recommendedWorkspace != "" and @variables.base_error_recoveryTried == False and @variables.base_content_userIntent != "" and @variables.base_error_stalled == False and @variables.base_data_needsGraphChoice == False:
+            set @variables.base_brand_workspaceOverride = @variables.base_content_recommendedWorkspace
+            set @variables.base_brand_workspaceId = @variables.base_content_recommendedWorkspace
+            set @variables.base_error_recoveryTried = True
+
+        # Step 3 -- STILL blank (auth failed / no workspace, or the one retry didn't help): fail fast
+        # with the diagnostic (the exact ECA/JWT/workspace step to fix), via the stall path. The build
+        # tool is also gated on a non-empty workspace, so a blank can never slip through to build.
+        if @variables.base_brand_workspaceId == "" and @variables.base_update_targetKey == "" and @variables.base_content_userIntent != "" and @variables.base_error_stalled == False and @variables.base_data_needsGraphChoice == False:
             set @variables.base_error_pipeline = @variables.base_error_workspace
             set @variables.base_error_stalled = True
 
@@ -967,12 +1508,34 @@ subagent plan:
         # (and did) emit fullTranslate:false / omit the userIntent echo, so translation silently
         # dropped. Now the LLM only CAPTURES the request (note_email_request -> base_content_userIntent);
         # planning is unskippable and bound to that real intent + the brand assets/voice above.
-        if @variables.base_content_userIntent != "" and @variables.base_content_structurePlanJson == "" and @variables.base_error_stalled == False:
+        # UNIFIED PLAN (build AND update) -- the create-planner prompt template (plan_email_structure_action)
+        # runs for BOTH. Proven 2026-09-27: the prompt-template planner reliably EXECUTES in the agent
+        # runtime, while the Apex plan_email_update_action never fired (any position/gating). So updates
+        # now go through this same proven path. For an UPDATE (base_update_targetKey != "") we pass the
+        # existing email's real blocks as Input:ExistingSlots -- the prompt's UPDATE-MODE section then
+        # plans ONLY against those real slot keys/types (slot1..N) instead of inventing new ones, so the
+        # emitted slots bind to the existing blocks at assemble. For a BUILD, Input:ExistingSlots is ""
+        # and the prompt invents slots as before. One writer of base_content_structurePlanJson, no
+        # adjacent-planner condition collision.
+        if @variables.base_content_userIntent != "" and @variables.base_content_structurePlanJson == "" and @variables.base_error_stalled == False and @variables.base_data_needsGraphChoice == False and (@variables.base_update_targetKey == "" or (@variables.base_update_emailBlocks != "" and @variables.base_update_emailBlocks != "[]")):
             run @actions.plan_email_structure_action
                 with "Input:UserIntent" = @variables.base_content_userIntent
-                with "Input:BrandContext" = @variables.base_brand_context
+                with "Input:BrandContext" = @variables.base_brand_planContext
                 with "Input:DataGraphContext" = @variables.base_data_graphContext
                 set @variables.base_content_structurePlanJson = @outputs.promptResponse
+
+        # UPDATE "all eligible slots" expansion -- runs after the plan, BEFORE fill_copy (which needs
+        # the full slot list to generate per-slot copy). The planner can only set applyToAllEligible
+        # (it doesn't know the real slot numbers); this Apex step reads the real blocks and expands the
+        # flagged axis across every eligible slot. Pass-through (plan unchanged) when nothing is flagged,
+        # so it is safe to run on every update-plan pass. Gated to updates with a plan and no copy yet.
+        if @variables.base_update_targetKey != "" and @variables.base_content_structurePlanJson != "" and @variables.base_content_copyJson == "" and @variables.base_error_stalled == False:
+            run @actions.expand_update_plan_slots_action
+                with structurePlanJson = @variables.base_content_structurePlanJson
+                with emailBlocksJson = @variables.base_update_emailBlocks
+                with updateTargetKey = @variables.base_update_targetKey
+                with userIntent = @variables.base_content_userIntent
+                set @variables.base_content_structurePlanJson = @outputs.expandedPlanJson
 
         # Deterministic drafting pipeline, not LLM-discretionary -- confirmed live,
         # repeatedly, that leaving write_email_copy_tool/assemble_content_plan_tool/
@@ -1005,7 +1568,24 @@ subagent plan:
         if @variables.base_content_structurePlanJson != "" and @variables.base_content_copyJson == "" and @variables.base_data_needsGraphChoice == False and @variables.base_error_pipeline != "":
             set @variables.base_error_stalled = True
 
-        if @variables.base_content_copyJson != "" and @variables.base_content_elementsJson == "" and @variables.base_data_needsGraphChoice == False and @variables.base_error_stalled == False:
+        # RE-DERIVE update slot bindings when they went stale. Confirmed live (sessions 01a0dbfa /
+        # 01a0dc00, 2026-09-26): update slot bindings are derived ONLY inside assemble, which re-runs
+        # only when base_content_elementsJson == "". Across a multi-turn update (a vague first request,
+        # then "use industry") assemble could have run once with no bindable axis -- caching a non-empty
+        # elementsJson AND base_update_slotBindingsJson = "[]" -- then been SKIPPED on the later turn, so
+        # bindings were never derived for the real axis. validate then read the stale "[]" and rejected
+        # ("This is an update, but no slots were chosen"), stalling a plan the user had approved. Fix:
+        # for an update (emailBlocks present) that HAS personalizations but STILL has empty bindings,
+        # clear elementsJson so the assemble step below re-runs THIS turn and re-derives the bindings
+        # from the current personalizations + read blocks, before validate. Guarded so it only fires
+        # for updates and never touches a fresh build (no emailBlocks) or an already-bound plan.
+        if @variables.base_update_emailBlocks != "" and @variables.base_update_emailBlocks != "[]" and @variables.base_content_elementsJson != "" and @variables.base_content_personalizationsJson != "" and @variables.base_content_personalizationsJson != "[]" and @variables.base_update_slotBindingsJson == "[]" and @variables.base_content_validated == False and @variables.base_error_stalled == False:
+            set @variables.base_content_elementsJson = ""
+
+        # Theory-A guard: for an update (targetKey set), assemble ONLY when the read blocks are present,
+        # so it can never run starved and silently emit slotBindings=[]. A build (targetKey == "") is
+        # unaffected. Bind updateTargetKey so Assemble fails loud if it ever reaches here without blocks.
+        if @variables.base_content_copyJson != "" and @variables.base_content_elementsJson == "" and @variables.base_data_needsGraphChoice == False and @variables.base_error_stalled == False and (@variables.base_update_targetKey == "" or (@variables.base_update_emailBlocks != "" and @variables.base_update_emailBlocks != "[]")):
             run @actions.assemble_content_plan_action_v2
                 with structurePlanJson = @variables.base_content_structurePlanJson
                 with copyJson = @variables.base_content_copyJson
@@ -1013,12 +1593,15 @@ subagent plan:
                 with availableFieldsJson = @variables.base_data_fieldsJson
                 with dataGraphCount = @variables.base_data_graphCount
                 with availableGraphNamesJson = @variables.base_data_availableGraphNames
+                with emailBlocksJson = @variables.base_update_emailBlocks
+                with updateTargetKey = @variables.base_update_targetKey
                 set @variables.base_content_title = @outputs.title
                 set @variables.base_content_subjectLine = @outputs.subjectLine
                 set @variables.base_content_preheader = @outputs.preheader
                 set @variables.base_content_urlName = @outputs.urlName
                 set @variables.base_content_elementsJson = @outputs.elementsJson
                 set @variables.base_content_personalizationsJson = @outputs.personalizationsJson
+                set @variables.base_update_slotBindingsJson = @outputs.slotBindingsJson
                 set @variables.base_content_personalizationNote = @outputs.personalizationNote
                 set @variables.base_content_planSummary = @outputs.planSummary
                 set @variables.base_data_needsGraphChoice = @outputs.needsGraphChoice
@@ -1031,12 +1614,14 @@ subagent plan:
         if @variables.base_data_needsGraphChoice == True:
             set @variables.base_error_pipeline = ""
 
-        # Separate check, not nested inside the run above -- stops the retry loop the
-        # instant assemble fails, rather than re-attempting the identical failing call
-        # every single turn with no visibility (the same failure class as build's own
-        # silent-retry problem, applied to the drafting stage instead of the build stage).
-        # needsGraphChoice is excluded -- that's an ask-the-user case, not a stall.
-        if @variables.base_content_copyJson != "" and @variables.base_content_elementsJson == "" and @variables.base_data_needsGraphChoice == False and @variables.base_error_pipeline != "":
+        # Stall on ANY assemble error -- NOT only when elementsJson is empty. Confirmed live: assemble
+        # can FAIL (e.g. two axes target the same slot, or >10 decisions) while STILL returning a
+        # populated elementsJson and a NULL personalizationsJson. The old check (elementsJson == "")
+        # missed that: the pipeline marched on, validate passed the null-personalization plan as valid,
+        # the update gate opened, and the tool fired with a null required input (REQUIRED_FIELD_MISSING).
+        # Keying the stall off base_error_pipeline (which assemble set from its errorMessage) catches
+        # every assemble failure. needsGraphChoice is excluded -- that's an ask-the-user case.
+        if @variables.base_content_copyJson != "" and @variables.base_data_needsGraphChoice == False and @variables.base_error_pipeline != "":
             set @variables.base_error_stalled = True
 
         if @variables.base_content_elementsJson != "" and @variables.base_content_validated == False and @variables.base_data_needsGraphChoice == False and @variables.base_error_stalled == False:
@@ -1045,9 +1630,60 @@ subagent plan:
                 with personalizationsJson = @variables.base_content_personalizationsJson
                 with resolvedGraphApiName = @variables.base_data_resolvedGraphApiName
                 with availableFieldsJson = @variables.base_data_fieldsJson
+                with workspaceId = @variables.base_brand_workspaceId
+                with title = @variables.base_content_title
+                with subjectLine = @variables.base_content_subjectLine
+                with preheader = @variables.base_content_preheader
+                with urlName = @variables.base_content_urlName
+                with emailBlocksJson = @variables.base_update_emailBlocks
+                with targetSlotsJson = @variables.base_update_slotBindingsJson
+                with updateTargetKey = @variables.base_update_targetKey
                 set @variables.base_content_validated = @outputs.isValid
                 set @variables.base_error_issuesJson = @outputs.issuesJson
+                # Carry the validation reason into base_error_pipeline -- the var the stall-report
+                # reasoning (above) reads. Without this a validate-origin stall had an EMPTY reason, so
+                # the stall report rendered blank and the confirm summary slipped through (the Konica
+                # translate silent-stall). errorMessage is the joined issues (see ValidateContentPlanAction).
+                set @variables.base_error_pipeline = @outputs.errorMessage
 
         if @variables.base_content_elementsJson != "" and @variables.base_content_validated == False and @variables.base_error_issuesJson != "" and @variables.base_error_issuesJson != "[]":
             set @variables.base_error_stalled = True
+
+        # ANTI-HALLUCINATION GUARDS -- close the "LLM narrates a summary/approval for a plan that did
+        # not actually finish" crack (HALLUCINATED-PROGRESS: confirmed live, stochastic on multi-step
+        # updates like translate -- the agent shows "here's what will be updated / approve?" or even
+        # "the update is being applied" while base_content_planSummary is empty and pp never moves; the
+        # build/update tool's confirm dialog can't render without a real personalizationSummary, so
+        # nothing is built). The reasoning STALL GUARD already forbids this, but it is PROSE and the LLM
+        # violates it intermittently. These make it deterministic. SAFE DISCRIMINATOR: gate on
+        # base_content_elementsJson != "" -- i.e. the plan actually REACHED assemble. Legitimate
+        # "still gathering" turns (understanding gate, brand ask, image-by-location needing per-value
+        # mappings) never reach assemble (the planner can't emit bindable slots), so elementsJson stays
+        # "" and these NEVER fire on them -- the agent correctly asks for more input instead. Runs after
+        # THIS turn's validate so it sees the real verdict, before the BACKSTOP.
+        #
+        # GUARD 1 -- assembled but validate returned NOT valid with NO issues: the issues-stall above
+        # (needs issuesJson non-empty) misses this, so validated stays False with no stall and the LLM
+        # can fabricate a summary. Mutually exclusive with the issues-stall by construction.
+        if @variables.base_content_elementsJson != "" and @variables.base_content_validated == False and @variables.base_error_stalled == False and @variables.base_data_needsGraphChoice == False and (@variables.base_error_issuesJson == "" or @variables.base_error_issuesJson == "[]"):
+            set @variables.base_error_pipeline = "I'm still finalizing this plan -- it assembled but hasn't passed validation yet, so it isn't ready to approve. Tell me to revise it (or restate what to change) and I'll re-run the checks."
+            set @variables.base_error_stalled = True
+        # GUARD 2 -- assembled but the AUTHORITATIVE summary is empty: assemble did not complete normally,
+        # so the LLM has a plan shell to describe but no planSummary to copy -> it fabricates one. The
+        # base_error_pipeline == "" clause keeps this from clobbering a real assemble/validate message.
+        if @variables.base_content_elementsJson != "" and @variables.base_content_planSummary == "" and @variables.base_error_stalled == False and @variables.base_data_needsGraphChoice == False and @variables.base_error_pipeline == "":
+            set @variables.base_error_pipeline = "I'm still finalizing this plan -- the personalization summary hasn't been produced yet, so there's nothing approved to build. Tell me to revise it and I'll re-run the plan."
+            set @variables.base_error_stalled = True
+
+        # DETERMINISTIC BACKSTOP -- an approval cannot stand against a plan that has not validated.
+        # Runs AFTER this turn's validate step so it sees the real result. Confirmed live (session
+        # 01a0dbaa, 2026-09-25): after an assemble stall the user said "revise ... 3 industries" but
+        # the LLM narrated a fresh summary WITHOUT calling note_email_request, so the pipeline never
+        # re-ran; base_content_validated stayed False while the LLM still set planApproved=True on the
+        # next "yes". Both build+update gates require validated==True, so the tool stayed unavailable
+        # with no signal to the user ("update_dynamic_email_tool is not available"). Revoking a stale
+        # approval here forces the reasoning back to the re-plan path (note_email_request) instead of
+        # a silent dead gate. A validated plan keeps its approval untouched.
+        if @variables.base_content_planApproved == True and @variables.base_content_validated == False:
+            set @variables.base_content_planApproved = False
 

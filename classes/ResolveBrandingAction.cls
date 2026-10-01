@@ -62,6 +62,12 @@ public with sharing class ResolveBrandingAction {
         // missing-workspace error at build time.
         @InvocableVariable(label='Workspace Error')
         public String workspaceError;
+        // The brand ASSET context (name→key pairs) folded together with the brand VOICE prose
+        // (description/identity/tone) as one string, so the Plan step can be voice-aware without a
+        // second template input. Bound to plan_email_structure_action's BrandContext. When no brand
+        // record was found the voice line is omitted, so this is just the asset context.
+        @InvocableVariable(label='Plan Brand Context (assets + voice)')
+        public String planBrandContext;
     }
 
     // Same test seam / token source the other callout actions use (DataGraphDetailsAction,
@@ -170,6 +176,9 @@ public with sharing class ResolveBrandingAction {
             res.suppressHeader = true;
             res.brandingResolved = true;
             res.brandingNote = '';
+            // Default to the raw asset context so Plan always gets at least what it got before, even
+            // on an early return path; the voice-folded value overwrites this once records are parsed.
+            res.planBrandContext = (req.brandContext == null) ? '' : req.brandContext;
 
             List<String> noteParts = new List<String>();
 
@@ -238,6 +247,7 @@ public with sharing class ResolveBrandingAction {
 
             // Brand RECORD (colors/fonts/buttons) from Find Brand Record -- first record only.
             String brandRecName = '';
+            String voiceLine = '';
             List<Object> records = parseArray(req.brandVoiceContext);
             if (!records.isEmpty() && records[0] instanceof Map<String, Object>) {
                 Map<String, Object> rec = (Map<String, Object>) records[0];
@@ -251,7 +261,27 @@ public with sharing class ResolveBrandingAction {
                 if (String.isBlank(workspaceId) && rec.get('workspaceId') != null) {
                     workspaceId = String.valueOf(rec.get('workspaceId'));
                 }
+                // Fold the record's voice prose (description/identity/tone) into a single line for the
+                // Plan step. Only the non-blank parts, so a sparse brand record doesn't emit empties.
+                List<String> vp = new List<String>();
+                for (String f : new List<String>{ 'description', 'identity', 'tone' }) {
+                    Object val = rec.get(f);
+                    if (val != null && String.isNotBlank(String.valueOf(val))) {
+                        vp.add(f + ': ' + String.valueOf(val));
+                    }
+                }
+                if (!vp.isEmpty()) {
+                    voiceLine = 'Brand voice for "' + (String.isNotBlank(brandRecName) ? brandRecName : 'this brand')
+                        + '" -- ' + String.join(vp, '; ') + '.';
+                }
             }
+
+            // Plan brand context = the asset context the Plan step already gets, plus the voice line
+            // (when a brand record with voice was found). One string, so Plan is voice-aware without a
+            // second prompt-template input. Falls back to just the asset context when no voice exists.
+            String assetCtx = req.brandContext == null ? '' : req.brandContext;
+            res.planBrandContext = String.isBlank(voiceLine) ? assetCtx
+                : (assetCtx + '\n' + voiceLine);
 
             res.resolvedContentSpaceId = workspaceId;
 

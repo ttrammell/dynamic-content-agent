@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<LightningComponentBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>62.0</apiVersion>
+    <isExposed>true</isExposed>
+    <masterLabel>Dynamic Content Agent</masterLabel>
+    <!-- Description capped at 255 chars by the platform. -->
+    <description>Read-only companion: the dynamic content wired into this email (summary widgets + detail), plus a DC Agent setup/health validation tab with models and a connection test. Runs in-frame as the user (no JWT) via the CMS editor content wire.</description>
+    <targets>
+        <target>lightning__CmsEditorExtension</target>
+    </targets>
+    <targetConfigs>
+        <targetConfig targets="lightning__CmsEditorExtension">
+            <!-- "large" is the documented max of the small|medium|large enum. (Was "x-large", accepted
+                 by the platform but non-standard; narrowed to large per UX preference.) -->
+            <size width="large" height="540"></size>
+        </targetConfig>
+    </targetConfigs>
+</LightningComponentBundle>

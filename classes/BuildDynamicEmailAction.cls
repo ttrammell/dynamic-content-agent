@@ -35,6 +35,15 @@ public with sharing class BuildDynamicEmailAction {
         @InvocableVariable(label='Elements JSON' required=true)
         public String elementsJson;
 
+        // The org's brand-asset catalog (the SAME list surfaced to the plan as BrandContext):
+        // a JSON array of {name, urlName, contentKey, ...}. Used to resolve an image element that
+        // references an asset by NAME (assetName) or ROLE (assetRole) into a real contentKey,
+        // deterministically in Apex -- so the LLM never has to transcribe an MC-key (which it can
+        // corrupt by a character). Optional: elements that already carry a literal contentKey, or
+        // that use logo/header roles (resolved from the override keys), don't need it.
+        @InvocableVariable(label='Assets JSON')
+        public String assetsJson;
+
         @InvocableVariable(label='Include Default Branding')
         public Boolean includeBranding;
 
@@ -115,6 +124,12 @@ public with sharing class BuildDynamicEmailAction {
 
         @InvocableVariable(label='Managed Content Id')
         public String managedContentId;
+
+        // Deep link to the CMS workspace where the email now lives (lands on the content list; the
+        // per-item route 404s). Built in Apex from the instance URL (domain -> lightning.force.com)
+        // + the workspace id, so the agent relays a real link instead of fabricating one.
+        @InvocableVariable(label='Content URL')
+        public String contentUrl;
 
         @InvocableVariable(label='Block Ids JSON')
         public String blockIdsJson;
@@ -326,17 +341,47 @@ public with sharing class BuildDynamicEmailAction {
             + String.join(new List<String>(KNOWN_PATH_ALIASES), ', '));
     }
 
-    private static Map<String, Object> textComparison(List<Object> path, String fieldApiName, String objectApiName, String operator, List<Object> values) {
+    // The comparison node's `type` MUST match the field's real data type or the DC platform rejects
+    // it ("Predicate type Text is not compatible with the data type of <field>"). Text is the default;
+    // Number covers Number/Currency/Percent/Double/Int; DateTime/Date -> DateComparison.
+    private static String comparisonTypeFor(String dataType) {
+        if (String.isBlank(dataType)) { return 'TextComparison'; }
+        String d = dataType.toLowerCase();
+        if (d.contains('date') || d.contains('time')) { return 'DateComparison'; }
+        if (d.contains('number') || d.contains('currency') || d.contains('percent')
+            || d.contains('double') || d.contains('int') || d.contains('decimal')) { return 'NumberComparison'; }
+        return 'TextComparison';
+    }
+
+    // Comparison keyed by the field's data type. `dataType` may be null (-> Text, the historical
+    // behavior). Numeric "equal"/"in" values are emitted as numbers, not strings.
+    private static Map<String, Object> fieldComparison(List<Object> path, String fieldApiName, String objectApiName,
+            String operator, List<Object> values, String dataType) {
+        String cmpType = comparisonTypeFor(dataType);
         Map<String, Object> tc = new Map<String, Object>{
-            'type' => 'TextComparison',
+            'type' => cmpType,
             'path' => path,
             'subject' => new Map<String, Object>{ 'fieldApiName' => fieldApiName, 'objectApiName' => objectApiName },
             'operator' => operator
         };
         if (values != null) {
-            tc.put('values', values);
+            if (cmpType == 'NumberComparison') {
+                List<Object> nums = new List<Object>();
+                for (Object v : values) {
+                    try { nums.add(Decimal.valueOf(String.valueOf(v).trim())); }
+                    catch (Exception e) { nums.add(v); /* leave as-is; platform will surface a clear error */ }
+                }
+                tc.put('values', nums);
+            } else {
+                tc.put('values', values);
+            }
         }
         return tc;
+    }
+
+    // Back-compat shim: existing callers that don't know the data type get Text behavior.
+    private static Map<String, Object> textComparison(List<Object> path, String fieldApiName, String objectApiName, String operator, List<Object> values) {
+        return fieldComparison(path, fieldApiName, objectApiName, operator, values, null);
     }
 
     // Confirmed: full state names ("California") silently break DC preview -- 2-letter codes
@@ -359,6 +404,31 @@ public with sharing class BuildDynamicEmailAction {
     // KNOWN_PATH_ALIASES) instead of the root UnifiedIndividual__dlm object.
     // Public so ValidateContentPlanAction can dry-run this same logic to catch bad
     // criteriaType/criteriaPath/values before the user is asked to approve a plan.
+    // Human display label for a decision. Base = the plan's label (else its name). For an
+    // equals/in decision, append the value(s) when the base doesn't already carry them -- so an
+    // axis whose decisions the planner named identically (e.g. all "Recipient industry") becomes
+    // "Recipient industry - Healthcare", "Recipient industry - Technology", etc. Presence checks
+    // (has_value) and labels that already include the value are left unchanged. Deterministic:
+    // never trusts the LLM to have distinguished the per-value names.
+    public static String decisionDisplayLabel(Map<String, Object> spec) {
+        String base = spec.get('label') != null && String.isNotBlank(String.valueOf(spec.get('label')))
+            ? String.valueOf(spec.get('label')) : String.valueOf(spec.get('name'));
+        if (String.isBlank(base) || base == 'null') { base = 'Decision'; }
+        String ct = String.valueOf(spec.get('criteriaType'));
+        // Collect the human value(s) for this decision.
+        List<String> vals = new List<String>();
+        if (ct == 'equals' && spec.get('value') != null) {
+            vals.add(String.valueOf(spec.get('value')));
+        } else if (ct == 'in' && spec.get('values') instanceof List<Object>) {
+            for (Object v : (List<Object>) spec.get('values')) { vals.add(String.valueOf(v)); }
+        }
+        if (vals.isEmpty()) { return base; }                 // has_value / no value -> no suffix
+        String valStr = String.join(vals, ', ');
+        // Already carries the value? (case-insensitive contains) -> leave as-is.
+        if (base.toLowerCase().contains(valStr.toLowerCase())) { return base; }
+        return base + ' - ' + valStr;
+    }
+
     public static Map<String, Object> buildDecisionCriteria(Map<String, Object> spec) {
         String fieldApiName = String.valueOf(spec.get('criteriaFieldApiName'));
         String objectApiName = String.isNotBlank(String.valueOf(spec.get('criteriaObjectApiName')))
@@ -368,6 +438,9 @@ public with sharing class BuildDynamicEmailAction {
 
         String criteriaType = String.isNotBlank(String.valueOf(spec.get('criteriaType')))
             ? String.valueOf(spec.get('criteriaType')) : 'has_value';
+        // Field data type (from the graph catalog, threaded by Assemble) -> selects Text/Number/Date
+        // comparison so the predicate matches the field. Absent -> Text (historical default).
+        String dataType = spec.get('dataType') == null ? null : String.valueOf(spec.get('dataType'));
 
         List<Object> values = null;
         if (criteriaType == 'equals') {
@@ -400,18 +473,18 @@ public with sharing class BuildDynamicEmailAction {
             if (criteriaType == 'has_value') {
                 return new Map<String, Object>{
                     'type' => 'LogicalComparison', 'operator' => 'and',
-                    'filters' => new List<Object>{ textComparison(path, fieldApiName, objectApiName, 'has value', null) }
+                    'filters' => new List<Object>{ fieldComparison(path, fieldApiName, objectApiName, 'has value', null, dataType) }
                 };
             }
             if (criteriaType == 'equals') {
                 return new Map<String, Object>{
                     'type' => 'LogicalComparison', 'operator' => 'and',
-                    'filters' => new List<Object>{ textComparison(path, fieldApiName, objectApiName, 'equal', values) }
+                    'filters' => new List<Object>{ fieldComparison(path, fieldApiName, objectApiName, 'equal', values, dataType) }
                 };
             }
             List<Object> orFilters = new List<Object>();
             for (Object v : values) {
-                orFilters.add(textComparison(path, fieldApiName, objectApiName, 'equal', new List<Object>{ v }));
+                orFilters.add(fieldComparison(path, fieldApiName, objectApiName, 'equal', new List<Object>{ v }, dataType));
             }
             return new Map<String, Object>{
                 'type' => 'LogicalComparison', 'operator' => 'and',
@@ -423,14 +496,14 @@ public with sharing class BuildDynamicEmailAction {
         if (criteriaType == 'in') {
             List<Object> orFilters = new List<Object>();
             for (Object v : values) {
-                orFilters.add(textComparison(path, fieldApiName, objectApiName, 'equal', new List<Object>{ v }));
+                orFilters.add(fieldComparison(path, fieldApiName, objectApiName, 'equal', new List<Object>{ v }, dataType));
             }
             innerFilter = new Map<String, Object>{ 'type' => 'LogicalComparison', 'operator' => 'or', 'filters' => orFilters };
         } else {
             String op = criteriaType == 'equals' ? 'equal' : 'has value';
             innerFilter = new Map<String, Object>{
                 'type' => 'LogicalComparison', 'operator' => 'and',
-                'filters' => new List<Object>{ textComparison(path, fieldApiName, objectApiName, op, values) }
+                'filters' => new List<Object>{ fieldComparison(path, fieldApiName, objectApiName, op, values, dataType) }
             };
         }
 
@@ -464,6 +537,12 @@ public with sharing class BuildDynamicEmailAction {
     // Salesforce's {!$Expression.FirstName} syntax, so the LLM only ever writes plain creative
     // text with a friendly placeholder and never touches CMS-internal merge-field syntax.
     private static final Pattern MERGE_PLACEHOLDER = Pattern.compile('\\{\\{(\\w+)(?:\\|([^}]*))?\\}\\}');
+    // The only merge fields expressionGroupsFor() can build a data-graph path for. A placeholder for
+    // anything else (e.g. {{PrimaryIndustry}} the model sometimes adds inside a segment-specific
+    // variant) is degraded to its default text rather than hard-failing the build.
+    private static final Set<String> SUPPORTED_MERGE_FIELDS = new Set<String>{
+        'FirstName', 'LastName', 'AccountName', 'Persona'
+    };
 
     private static void substituteMergePlaceholders(Map<String, Object> el, Map<String, Object> expressionsByKey) {
         Object raw = el.get('text');
@@ -487,10 +566,20 @@ public with sharing class BuildDynamicEmailAction {
         while (m.find()) {
             String fieldName = m.group(1);
             String defaultText = m.group(2);
-            if (!expressionsByKey.containsKey(fieldName)) {
-                expressionsByKey.put(fieldName, multiLevelExpressionEntry(fieldName, defaultText));
+            if (SUPPORTED_MERGE_FIELDS.contains(fieldName)) {
+                // A real, resolvable merge field -> wire it as an $Expression.
+                if (!expressionsByKey.containsKey(fieldName)) {
+                    expressionsByKey.put(fieldName, multiLevelExpressionEntry(fieldName, defaultText));
+                }
+                result += text.substring(lastEnd, m.start()) + '{!$Expression.' + fieldName + '}';
+            } else {
+                // UNSUPPORTED merge field (e.g. {{PrimaryIndustry}} the model added inside an
+                // industry-specific variant, where it's redundant AND not a resolvable send-time
+                // field). Degrade to the placeholder's default text (or drop it) instead of hard-
+                // failing the whole build with "Unsupported merge field" -- the variant text is
+                // already segment-specific; the inline token was never needed.
+                result += text.substring(lastEnd, m.start()) + (defaultText == null ? '' : defaultText);
             }
-            result += text.substring(lastEnd, m.start()) + '{!$Expression.' + fieldName + '}';
             lastEnd = m.end();
         }
         result += text.substring(lastEnd);
@@ -566,6 +655,22 @@ public with sharing class BuildDynamicEmailAction {
         };
     }
 
+    // Image altText lives in the same `attributes` object as a button's label text, whose org hard
+    // limit is 255 (confirmed live: "attributes.text may only be 255 characters long"). altText is
+    // plan-authored (LLM) and otherwise unclamped, so a verbose alt string would fail the PUT the same
+    // way the button did. Clamp a few chars under, on a word boundary. No-op when short. One write
+    // point (line below) covers both the base image and the image-swap variant callers.
+    private static final Integer ALT_TEXT_MAX = 250;
+    private static String clampAltText(String s) {
+        if (String.isBlank(s)) { return s; }
+        String t = s.trim();
+        if (t.length() <= ALT_TEXT_MAX) { return t; }
+        String cut = t.substring(0, ALT_TEXT_MAX);
+        Integer sp = cut.lastIndexOf(' ');
+        if (sp >= ALT_TEXT_MAX / 2) { cut = cut.substring(0, sp); }
+        return cut.trim();
+    }
+
     private static Map<String, Object> imageAttributes(String contentKey, String altText, Decimal widthPercent, Map<String, Object> padding) {
         return new Map<String, Object>{
             'imageFitConfig' => new Map<String, Object>{
@@ -587,7 +692,7 @@ public with sharing class BuildDynamicEmailAction {
                     'type' => 'imageReference'
                 },
                 'url' => '/cms/media/' + contentKey,
-                'altText' => altText
+                'altText' => clampAltText(altText)
             },
             'lightning:horizontalAlignment' => 'center',
             // Images space with lightning:margin, NOT lightning:padding -- matches the marketing
@@ -728,8 +833,17 @@ public with sharing class BuildDynamicEmailAction {
     // native SOQL engine rejects it in both static and dynamic (Database.query) form --
     // confirmed live in FindBrandAssetsAction. The REST /query endpoint accepts it fine, so
     // this type lookup goes through a callout rather than a native SOQL WHERE/SELECT.
-    private static Map<String, String> queryContentTypesByKey(String accessToken, Set<String> keys) {
+    // Result of a content-key lookup: whether the lookup callout itself succeeded (so callers can
+    // fail-open on a transport error but fail-loud on a genuinely absent key), the set of keys that
+    // actually EXIST in the org, and the content type of each.
+    private class KeyLookup {
+        Boolean ran = false;                                  // the /query callout returned 200
+        Set<String> existing = new Set<String>();             // keys present in the org (any type)
         Map<String, String> typeByKey = new Map<String, String>();
+    }
+
+    private static KeyLookup queryContentKeys(String accessToken, Set<String> keys) {
+        KeyLookup out = new KeyLookup();
         List<String> quoted = new List<String>();
         for (String k : keys) {
             quoted.add('\'' + String.escapeSingleQuotes(k) + '\'');
@@ -743,22 +857,24 @@ public with sharing class BuildDynamicEmailAction {
         queryReq.setTimeout(30000);
         HttpResponse queryRes = new Http().send(queryReq);
         if (queryRes.getStatusCode() != 200) {
-            // Fail open on a lookup/transport error -- an unrelated API hiccup here shouldn't
-            // block a build that the CMS callout itself would otherwise accept. A genuinely
-            // wrong contentKey type is still caught below whenever this lookup does succeed.
-            return typeByKey;
+            // Lookup/transport error -- leave ran=false so callers fail OPEN (an unrelated API
+            // hiccup here shouldn't block a build the CMS callout would otherwise accept).
+            return out;
         }
+        out.ran = true;
         Map<String, Object> parsed = (Map<String, Object>) JSON.deserializeUntyped(queryRes.getBody());
         for (Object recObj : (List<Object>) parsed.get('records')) {
             Map<String, Object> rec = (Map<String, Object>) recObj;
             String key = String.valueOf(rec.get('ManagedContentKey'));
+            if (String.isBlank(key)) { continue; }
+            out.existing.add(key);
             Map<String, Object> mc = (Map<String, Object>) rec.get('ManagedContent');
             String contentType = mc != null ? String.valueOf(mc.get('ContentTypeFullyQualifiedName')) : null;
-            if (String.isNotBlank(key) && String.isNotBlank(contentType)) {
-                typeByKey.put(key, contentType);
+            if (String.isNotBlank(contentType)) {
+                out.typeByKey.put(key, contentType);
             }
         }
-        return typeByKey;
+        return out;
     }
 
     // Deterministic guard, not a prompt instruction: confirmed live that branding resolution
@@ -768,21 +884,240 @@ public with sharing class BuildDynamicEmailAction {
     // only its shape (see the "MC" prefix check in buildElementBlock). Fed to CMS as-is, this
     // produces an opaque HTTP 500 "UNKNOWN_EXCEPTION" deep in the CMS renderer instead of a
     // clear error here.
+    // Rewrite each image element's contentKey from an asset ROLE (logo/header -> the request's
+    // already-resolved override keys) or an exact asset NAME (matched against assetsJson, the same
+    // catalog the plan saw as BrandContext). The LLM emits assetRole/assetName, never a raw key.
+    // Back-compat: a literal contentKey that's already present is left as-is. Fails loud (clear,
+    // build-blocking message) on a name that matches zero or many assets, so a bad reference never
+    // slips through as an opaque CMS 404.
+    private static void resolveImageRefs(List<Object> elements, Request req) {
+        // Build name -> contentKey from the asset catalog (exact, case-insensitive on trimmed name).
+        Map<String, String> keyByName = new Map<String, String>();
+        Map<String, Integer> nameCount = new Map<String, Integer>();
+        if (String.isNotBlank(req.assetsJson)) {
+            Object parsed;
+            try { parsed = JSON.deserializeUntyped(AuraPocJson.stripFence(req.assetsJson)); }
+            catch (Exception e) { parsed = null; }
+            if (parsed instanceof List<Object>) {
+                for (Object o : (List<Object>) parsed) {
+                    if (!(o instanceof Map<String, Object>)) { continue; }
+                    Map<String, Object> a = (Map<String, Object>) o;
+                    String nm = a.get('name') == null ? '' : String.valueOf(a.get('name')).trim().toLowerCase();
+                    String ck = a.get('contentKey') == null ? '' : String.valueOf(a.get('contentKey'));
+                    if (String.isBlank(nm) || String.isBlank(ck)) { continue; }
+                    keyByName.put(nm, ck);
+                    nameCount.put(nm, (nameCount.containsKey(nm) ? nameCount.get(nm) : 0) + 1);
+                }
+            }
+        }
+        for (Object elObj : elements) {
+            if (!(elObj instanceof Map<String, Object>)) { continue; }
+            Map<String, Object> el = (Map<String, Object>) elObj;
+            if (String.valueOf(el.get('type')) != 'image') { continue; }
+
+            // Already has a literal key (back-compat / other callers) -> leave it; the existence
+            // guard downstream still verifies it.
+            if (String.isNotBlank(String.valueOf(el.get('contentKey')))) { continue; }
+
+            String role = el.get('assetRole') == null ? '' : String.valueOf(el.get('assetRole')).trim().toLowerCase();
+            String assetName = el.get('assetName') == null ? '' : String.valueOf(el.get('assetName')).trim();
+
+            if (role == 'logo' || role == 'header') {
+                String resolved = role == 'logo' ? req.logoContentKeyOverride : req.headerContentKeyOverride;
+                if (String.isBlank(resolved)) {
+                    throw new ElementException('Image element "' + String.valueOf(el.get('key'))
+                        + '" asks for the ' + role + ', but no ' + role + ' was resolved for this '
+                        + 'build (Resolve Branding found none). Omit the ' + role + ' image slot, or '
+                        + 'ensure the brand has a ' + role + ' asset.');
+                }
+                el.put('contentKey', resolved);
+                continue;
+            }
+
+            if (String.isNotBlank(assetName)) {
+                String nmKey = assetName.toLowerCase();
+                Integer cnt = nameCount.containsKey(nmKey) ? nameCount.get(nmKey) : 0;
+                if (cnt == 0) {
+                    throw new ElementException('Image element "' + String.valueOf(el.get('key'))
+                        + '" references asset "' + assetName + '", which does not exist in this org\'s '
+                        + 'brand assets. Use only an exact asset name from the provided list, or omit '
+                        + 'the image slot.');
+                }
+                if (cnt > 1) {
+                    throw new ElementException('Image element "' + String.valueOf(el.get('key'))
+                        + '" references asset "' + assetName + '", which is ambiguous (' + cnt
+                        + ' assets share that name). Reference it a different way or rename the assets.');
+                }
+                el.put('contentKey', keyByName.get(nmKey));
+                continue;
+            }
+
+            // Neither a literal key, a role, nor a resolvable name -> fail loud rather than build a
+            // blank image (buildElementBlock would reject it, but with a less specific message).
+            throw new ElementException('Image element "' + String.valueOf(el.get('key'))
+                + '" has no resolvable asset -- provide assetRole (logo/header) or an exact assetName '
+                + 'from the brand asset list. The system resolves the real contentKey; do not supply one.');
+        }
+    }
+
+    // Build a name(lowercased)->contentKey map + a name->count (for ambiguity) from an assets JSON
+    // catalog. Shared by base-element and variant-image resolution.
+    private static void buildAssetNameMap(String assetsJson, Map<String, String> keyByName, Map<String, Integer> nameCount) {
+        if (String.isBlank(assetsJson)) { return; }
+        Object parsed;
+        try { parsed = JSON.deserializeUntyped(AuraPocJson.stripFence(assetsJson)); }
+        catch (Exception e) { return; }
+        if (!(parsed instanceof List<Object>)) { return; }
+        for (Object o : (List<Object>) parsed) {
+            if (!(o instanceof Map<String, Object>)) { continue; }
+            Map<String, Object> a = (Map<String, Object>) o;
+            String nm = a.get('name') == null ? '' : String.valueOf(a.get('name')).trim().toLowerCase();
+            String ck = a.get('contentKey') == null ? '' : String.valueOf(a.get('contentKey'));
+            if (String.isBlank(nm) || String.isBlank(ck)) { continue; }
+            keyByName.put(nm, ck);
+            nameCount.put(nm, (nameCount.containsKey(nm) ? nameCount.get(nm) : 0) + 1);
+        }
+    }
+
+    // Ordered, DISTINCT list of image contentKeys from the catalog, preserving catalog order. Used by
+    // the deterministic image auto-assign fallback so each personalized decision gets a different real
+    // image even when the plan named no asset. Order is stable within a run (catalog is fetched once).
+    private static List<String> orderedCatalogKeys(String assetsJson) {
+        List<String> out = new List<String>();
+        Set<String> seen = new Set<String>();
+        if (String.isBlank(assetsJson)) { return out; }
+        Object parsed;
+        try { parsed = JSON.deserializeUntyped(AuraPocJson.stripFence(assetsJson)); }
+        catch (Exception e) { return out; }
+        if (!(parsed instanceof List<Object>)) { return out; }
+        for (Object o : (List<Object>) parsed) {
+            if (!(o instanceof Map<String, Object>)) { continue; }
+            String ck = ((Map<String, Object>) o).get('contentKey') == null ? ''
+                : String.valueOf(((Map<String, Object>) o).get('contentKey'));
+            if (String.isNotBlank(ck) && !seen.contains(ck)) { seen.add(ck); out.add(ck); }
+        }
+        return out;
+    }
+
+    // Resolve image-DC VARIANT keys the same way base image elements are resolved: each image
+    // target's textByDecision value is an object; if it carries assetRole (logo/header) or assetName
+    // (exact catalog match) we rewrite its contentKey to the real key -- so an image-swap variant
+    // never depends on an LLM-typed MC-key (which it can corrupt by a character, exactly the base
+    // bug, reproduced live inside variants). A literal contentKey is left for the existence guard.
+    // Mutates ppSpecs in place; returns the set of resolved variant image keys to existence-check.
+    // Shared by Build and Update (called via sharedResolveVariantImageRefs).
+    private static Set<String> resolveVariantImageRefs(List<Object> ppSpecs, String assetsJson,
+            String logoKey, String headerKey) {
+        Set<String> keys = new Set<String>();
+        Map<String, String> keyByName = new Map<String, String>();
+        Map<String, Integer> nameCount = new Map<String, Integer>();
+        buildAssetNameMap(assetsJson, keyByName, nameCount);
+        // Ordered, DISTINCT list of catalog image contentKeys, for the deterministic auto-assign
+        // fallback below: when the plan personalizes an image slot but the model picked NO asset for a
+        // decision (common with generic stock that fits no business axis), we still want a visible,
+        // different image per audience -- so we hand each such decision the next distinct catalog image
+        // (round-robin), rather than failing the whole update. Order = catalog order (stable per run).
+        List<String> catalogKeys = orderedCatalogKeys(assetsJson);
+
+        for (Object ppObj : ppSpecs) {
+            Map<String, Object> pp = (Map<String, Object>) ppObj;
+            Object tjObj = pp.get('targetsJson');
+            if (tjObj == null) { continue; }
+            List<Object> targets = (List<Object>) JSON.deserializeUntyped(String.valueOf(tjObj));
+            Boolean changed = false;
+            for (Object tObj : targets) {
+                Map<String, Object> t = (Map<String, Object>) tObj;
+                if (String.valueOf(t.get('blockDefinition')) != 'lightning/image') { continue; }
+                Object tbd = t.get('textByDecision');
+                if (!(tbd instanceof Map<String, Object>)) { continue; }
+                Map<String, Object> byDec = (Map<String, Object>) tbd;
+                // Per-target counter for the round-robin auto-assign fallback, so distinct decisions
+                // on THIS image target land on distinct catalog images (dec 1 -> catalogKeys[0], etc).
+                Integer autoIdx = 0;
+                for (String dec : byDec.keySet()) {
+                    if (!(byDec.get(dec) instanceof Map<String, Object>)) { continue; }
+                    Map<String, Object> img = (Map<String, Object>) byDec.get(dec);
+                    String existing = img.get('contentKey') == null ? '' : String.valueOf(img.get('contentKey'));
+                    String role = img.get('assetRole') == null ? '' : String.valueOf(img.get('assetRole')).trim().toLowerCase();
+                    String assetName = img.get('assetName') == null ? '' : String.valueOf(img.get('assetName')).trim();
+                    String resolved = '';
+                    if (String.isNotBlank(existing)) {
+                        resolved = existing;                        // literal -> existence-checked below
+                    } else if (role == 'logo' || role == 'header') {
+                        resolved = role == 'logo' ? logoKey : headerKey;
+                        if (String.isBlank(resolved)) {
+                            throw new ElementException('An image-swap variant asks for the ' + role
+                                + ', but no ' + role + ' was resolved for this build.');
+                        }
+                        img.put('contentKey', resolved); changed = true;
+                    } else if (String.isNotBlank(assetName)) {
+                        String nmKey = assetName.toLowerCase();
+                        Integer cnt = nameCount.containsKey(nmKey) ? nameCount.get(nmKey) : 0;
+                        if (cnt == 0) {
+                            throw new ElementException('Image-swap variant references asset "' + assetName
+                                + '", which does not exist in this org\'s brand assets. Use an exact asset '
+                                + 'name from the provided list.');
+                        }
+                        if (cnt > 1) {
+                            throw new ElementException('Image-swap variant references asset "' + assetName
+                                + '", which is ambiguous (' + cnt + ' assets share that name).');
+                        }
+                        resolved = keyByName.get(nmKey);
+                        img.put('contentKey', resolved); changed = true;
+                    } else if (!catalogKeys.isEmpty()) {
+                        // DETERMINISTIC AUTO-ASSIGN: the plan personalized this image slot but named no
+                        // asset for this decision. Hand this decision the next DISTINCT catalog image so
+                        // the audience sees a different picture. INSUFFICIENT-IMAGES GUARD: if there are
+                        // more auto-assigned decisions than distinct catalog images, the round-robin would
+                        // WRAP and reuse an image -- two audiences would silently get the same picture, so
+                        // the "swap" is invisible. Fail loud here (before any variant ships) with the counts
+                        // instead. (ReadDynamicEmailAction's >= MIN_IMAGES_FOR_SWAP offer floor prevents the
+                        // common case; this backstops when a request slips through with too many values.)
+                        if (autoIdx >= catalogKeys.size()) {
+                            throw new ElementException('Personalizing this image by ' + (autoIdx + 1)
+                                + ' or more values needs that many distinct images, but this org has only '
+                                + catalogKeys.size() + ' image(s) to swap between. Reduce the number of values, '
+                                + 'name a specific image per value, or add more stock/brand images.');
+                        }
+                        resolved = catalogKeys[autoIdx];
+                        autoIdx++;
+                        img.put('contentKey', resolved); changed = true;
+                    } else {
+                        throw new ElementException('Personalizing an image means swapping the picture per '
+                            + 'audience, but this org has no images to swap between. Add stock or brand '
+                            + 'images (at least ' + 2 + '), or personalize a text slot (paragraph/heading/button) instead.');
+                    }
+                    if (String.isNotBlank(resolved)) { keys.add(resolved); }
+                }
+            }
+            if (changed) { pp.put('targetsJson', JSON.serialize(targets)); }
+        }
+        return keys;
+    }
+
     private static void validateImageContentKeys(String accessToken, Set<String> keys) {
         if (keys.isEmpty()) {
             return;
         }
-        Map<String, String> typeByKey = queryContentTypesByKey(accessToken, keys);
+        KeyLookup look = queryContentKeys(accessToken, keys);
+        // If the lookup callout itself didn't run (transport error), fail OPEN -- don't block a
+        // build the CMS callout would otherwise accept.
+        if (!look.ran) {
+            return;
+        }
         for (String k : keys) {
-            String actualType = typeByKey.get(k);
-            if (actualType == null) {
-                // Lookup succeeded but this key wasn't found at all (or the lookup itself
-                // failed, in which case typeByKey is empty for every key) -- don't block on a
-                // missing lookup, only on a confirmed wrong type. A truly invalid/deleted
-                // contentKey still surfaces naturally from the CMS create callout itself.
-                continue;
+            // Lookup ran and this key is genuinely absent from the org -- almost always an
+            // LLM-fabricated contentKey (MC-shaped so it passes the format guard, but no such
+            // record exists). Fail loud here with the key named, instead of letting the CMS
+            // create callout reject it later with an opaque CONTENT_NOT_FOUND 404.
+            if (!look.existing.contains(k)) {
+                throw new ElementException('Image content key "' + k + '" does not exist in this '
+                    + 'org -- it looks like a fabricated/placeholder key, not a real CMS asset. '
+                    + 'Use only contentKeys returned by Find Brand Assets for this org, or omit '
+                    + 'the image slot if no real asset was found.');
             }
-            if (actualType != 'sfdc_cms__image') {
+            String actualType = look.typeByKey.get(k);
+            if (actualType != null && actualType != 'sfdc_cms__image') {
                 throw new ElementException('Content key "' + k + '" is a ' + actualType
                     + ' record, not an image -- it cannot be used as a logo, header, or body '
                     + 'image. This is almost always a brand-record contentKey (from Find Brand '
@@ -841,7 +1176,15 @@ public with sharing class BuildDynamicEmailAction {
                         + 'Omit brandContentKeyOverride entirely if no brand record was found for this brand.');
                 }
 
-                List<Object> elements = (List<Object>) JSON.deserializeUntyped(req.elementsJson);
+                List<Object> elements = (List<Object>) JSON.deserializeUntyped(AuraPocJson.stripFence(req.elementsJson));
+
+                // Deterministically resolve every image element's contentKey from an asset ROLE or
+                // NAME, so the LLM never has to transcribe an MC-key (a more capable model corrupted
+                // one by a single character -- MC3.. vs the real MC4.. -- which is far worse than an
+                // obvious fake). role=logo/header -> the already-resolved override keys; a name ->
+                // an exact match in the asset catalog. A literal contentKey is still honored for
+                // back-compat. Rewrites el.contentKey in place; fails loud on an unresolvable ref.
+                resolveImageRefs(elements, req);
 
                 // The equality guard above only catches a brand/logo mixup when the SAME wrong
                 // key is reused in two places -- confirmed live it doesn't help when the wrong
@@ -1058,6 +1401,7 @@ public with sharing class BuildDynamicEmailAction {
                 res.contentKey = keyObj != null ? String.valueOf(keyObj) : null;
                 managedContentId = created.get('managedContentId') != null ? String.valueOf(created.get('managedContentId')) : null;
                 res.managedContentId = managedContentId;
+                res.contentUrl = cmsContentUrl(managedContentId);
                 res.blockIdsJson = JSON.serialize(blockIds);
                 res.success = true;
                 res.personalized = false;
@@ -1088,7 +1432,7 @@ public with sharing class BuildDynamicEmailAction {
                     continue;
                 }
 
-                List<Object> ppSpecs = (List<Object>) JSON.deserializeUntyped(req.personalizationsJson);
+                List<Object> ppSpecs = (List<Object>) JSON.deserializeUntyped(AuraPocJson.stripFence(req.personalizationsJson));
                 if (ppSpecs.isEmpty()) {
                     results.add(res);
                     continue;
@@ -1097,6 +1441,12 @@ public with sharing class BuildDynamicEmailAction {
                     throw new WireException('personalizationsJson has ' + ppSpecs.size() + ' entries, but at most '
                         + MAX_PPS_PER_EMAIL + ' PersonalizationPoints are supported per email.');
                 }
+
+                // Resolve image-SWAP variant keys by role/name (never trust an LLM-typed variant
+                // key), then existence-check them -- same guarantee as base image elements.
+                Set<String> variantImgKeys = resolveVariantImageRefs(ppSpecs, req.assetsJson,
+                    req.logoContentKeyOverride, req.headerContentKeyOverride);
+                validateImageContentKeys(accessToken, variantImgKeys);
 
                 // --- Step 2: personalize, in the same call. Any failure here rolls back Step 1. ---
                 try {
@@ -1271,10 +1621,16 @@ public with sharing class BuildDynamicEmailAction {
                 safeDecisionNameByRaw.put(rawName, safeName);
 
                 Map<String, Object> criteria = buildDecisionCriteria(spec);
+                // Display label: append the decision's actual VALUE when the plan named every
+                // decision on an axis the same (e.g. all "Recipient industry") -- the small planner
+                // model sometimes collapses per-value names. Deterministic, so the rule reads
+                // "Recipient industry - Healthcare" / "- Technology" in Builder, not four identical
+                // "Recipient industry" rows. Presence (has_value) checks get no suffix.
+                String dispLabel = decisionDisplayLabel(spec);
                 ppDecisions.add(new Map<String, Object>{
-                    'label' => spec.get('label'),
+                    'label' => dispLabel,
                     'name' => safeName,
-                    'description' => spec.get('label'),
+                    'description' => dispLabel,
                     'personalizerName' => null,
                     'attributeValues' => new List<Object>{
                         new Map<String, Object>{ 'attributeEnum' => 'Variation', 'value' => safeName, 'attributeName' => null }
@@ -1312,14 +1668,23 @@ public with sharing class BuildDynamicEmailAction {
             for (Object targetObj : targetSpecs) {
                 Map<String, Object> target = (Map<String, Object>) targetObj;
                 String elementKey = String.valueOf(target.get('elementKey'));
-                if (!blockIds.containsKey(elementKey)) {
+                String tgtDef = target.get('blockDefinition') != null ? String.valueOf(target.get('blockDefinition')) : '';
+                // The subject/preheader component has no block, so it is NOT in blockIds -- that's
+                // expected, not an error. Every real block target must resolve to a block id.
+                Boolean spComponent = (tgtDef == 'sfdc_cms__subjectPreheader' || elementKey == 'subject_preheader');
+                if (!spComponent && !blockIds.containsKey(elementKey)) {
                     throw new WireException('targetsJson references unknown element key "' + elementKey
                         + '" -- must match a "key" from elementsJson.');
                 }
-                String targetBlockId = String.valueOf(blockIds.get(elementKey));
                 String blockDefinition = target.get('blockDefinition') != null
                     ? String.valueOf(target.get('blockDefinition')) : 'lightning/paragraph';
                 Map<String, Object> textByDecision = (Map<String, Object>) target.get('textByDecision');
+                // SUBJECT/PREHEADER component: personalizes email metadata, not a block, so there is no
+                // block id to resolve, the variant body is {subjectLine, preheader}, and the operation
+                // carries NO targetId (captured from a real UI example). Everything else (PP name,
+                // decisionToVariantList) is identical to a block PP.
+                Boolean isSubjectPreheader = (blockDefinition == 'sfdc_cms__subjectPreheader' || elementKey == 'subject_preheader');
+                String targetBlockId = isSubjectPreheader ? null : String.valueOf(blockIds.get(elementKey));
 
                 List<Object> decisionToVariantList = new List<Object>();
                 for (Object specObj : decisionSpecs) {
@@ -1340,11 +1705,18 @@ public with sharing class BuildDynamicEmailAction {
                     allVariantIdEntries.add(new Map<String, Object>{
                         'ppName' => safePpName, 'elementKey' => elementKey, 'decisionName' => safeDecisionName, 'variantId' => variantUuid
                     });
-                    allVariants.add(new Map<String, Object>{
-                        'id' => variantUuid,
-                        'name' => spec.get('label'),
-                        'type' => 'personalization',
-                        'body' => new Map<String, Object>{
+                    Map<String, Object> variantBody;
+                    if (isSubjectPreheader) {
+                        // The variant body IS the subject/preheader override object {subjectLine, preheader}
+                        // for this decision. A decision that doesn't apply carries an empty object -> keep
+                        // the email's base subject/preheader (don't emit blank overrides).
+                        Object dv = textByDecision.get(rawDecisionName);
+                        Map<String, Object> sp = (dv instanceof Map<String, Object>) ? (Map<String, Object>) dv : new Map<String, Object>();
+                        variantBody = new Map<String, Object>();
+                        if (sp.get('subjectLine') != null) { variantBody.put('subjectLine', sp.get('subjectLine')); }
+                        if (sp.get('preheader') != null) { variantBody.put('preheader', sp.get('preheader')); }
+                    } else {
+                        variantBody = new Map<String, Object>{
                             'sfdc_cms:block' => new Map<String, Object>{
                                 'children' => new List<Object>{
                                     new Map<String, Object>{
@@ -1355,18 +1727,27 @@ public with sharing class BuildDynamicEmailAction {
                                     }
                                 }
                             }
-                        }
+                        };
+                    }
+                    allVariants.add(new Map<String, Object>{
+                        'id' => variantUuid,
+                        'name' => spec.get('label'),
+                        'type' => 'personalization',
+                        'body' => variantBody
                     });
                 }
 
-                allOperations.add(new Map<String, Object>{
+                Map<String, Object> op = new Map<String, Object>{
                     'attributes' => new Map<String, Object>{
                         'decisionToVariantList' => decisionToVariantList,
                         'personalizationPoint' => new Map<String, Object>{ 'dataspace' => dataSpace, 'name' => safePpName }
                     },
-                    'definition' => 'sfdc_cms__pspVariantOperation',
-                    'targetId' => targetBlockId
-                });
+                    'definition' => 'sfdc_cms__pspVariantOperation'
+                };
+                // Block ops carry the target block UUID; the subject/preheader component op has NO
+                // targetId (that absence is what marks it as the subject/preheader component target).
+                if (!isSubjectPreheader) { op.put('targetId', targetBlockId); }
+                allOperations.add(op);
             }
         }
     }
@@ -1490,4 +1871,41 @@ public with sharing class BuildDynamicEmailAction {
         return base + '_' + suffix;
     }
 
+    // ===== Shared with UpdateDynamicEmailAction (separate class -- Apex allows only one =====
+    // ===== @InvocableMethod per class, so the update action lives on its own and calls =====
+    // ===== these). =====
+    public static AuraPocTokenSource sharedTokenSource() { return tokenSource; }
+    // Test/diagnostic hook for the merge-placeholder substitution: converts supported {{Field}} to
+    // {!$Expression.Field} and degrades unsupported fields to their default text (no throw).
+    public static String sharedSubstituteMergePlaceholders(String text) {
+        return substituteMergePlaceholdersInText(text, new Map<String, Object>());
+    }
+    // Direct link to the built/updated email RECORD -- opens the specific ManagedContent, not the
+    // workspace list. managedContentId is the 20Y... record id the create/GET returns. Uses the
+    // lightning domain (instance URL is .my.salesforce.com; the record route needs .lightning.force.com).
+    public static String cmsContentUrl(String managedContentId) {
+        if (String.isBlank(managedContentId)) { return ''; }
+        String host = AuraPocTokenProvider.instanceUrl().replace('.my.salesforce.com', '.lightning.force.com');
+        return host + '/lightning/r/ManagedContent/' + managedContentId + '/view';
+    }
+    public static Map<String, Object> sharedDataGraphDataProvider(String graphName, String dataSpace) {
+        return dataGraphDataProvider(graphName, dataSpace);
+    }
+    public static Boolean sharedDeletePp(AuraSessionMinter.Session sess, String auraContextJson, String ppName) {
+        return deletePersonalizationPointBestEffort(sess, auraContextJson, ppName);
+    }
+    public static Set<String> sharedResolveVariantImageRefs(List<Object> ppSpecs, String assetsJson,
+            String logoKey, String headerKey) {
+        return resolveVariantImageRefs(ppSpecs, assetsJson, logoKey, headerKey);
+    }
+    public static void sharedValidateImageContentKeys(String accessToken, Set<String> keys) {
+        validateImageContentKeys(accessToken, keys);
+    }
+    public static void sharedWirePersonalizationsInner(List<Object> ppSpecs, AuraSessionMinter.Session sess,
+            String auraContextJson, Map<String, Object> expressionsByKey, Map<String, Object> blockIds,
+            String dataSpace, String graphName, String managedContentId, List<Object> allOperations,
+            List<Object> allVariants, List<Object> allVariantIdEntries, List<String> createdPpNames) {
+        wirePersonalizationsInner(ppSpecs, sess, auraContextJson, expressionsByKey, blockIds, dataSpace,
+            graphName, managedContentId, allOperations, allVariants, allVariantIdEntries, createdPpNames);
+    }
 }

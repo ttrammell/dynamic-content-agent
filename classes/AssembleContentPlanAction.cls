@@ -42,6 +42,22 @@ public with sharing class AssembleContentPlanAction {
         // Real graph names to offer the user when dataGraphCount > 1 and none is resolved yet.
         @InvocableVariable(label='Available Graph Names JSON')
         public String availableGraphNamesJson;
+        // UPDATE mode: the existing email's blocks (ReadDynamicEmailAction.blocksJson --
+        // [{def, text, contentKey, personalized}] in document order). When non-empty, this is an
+        // update to an existing email: each personalization target is stamped with the REAL block's
+        // matchText (heading/paragraph) or matchContentKey (image), mapped by (type, ordinal), so
+        // UpdateDynamicEmailAction matches against actual blocks -- never LLM-invented text. Empty =
+        // a normal new-email build (no stamping).
+        @InvocableVariable(label='Existing Blocks JSON')
+        public String emailBlocksJson;
+
+        // UPDATE mode signal: the content key of the existing email being updated (base_update_targetKey).
+        // Non-blank => this is an update. Used ONLY to fail loud when an update reaches assembly without
+        // its read blocks (the Theory-A silent-[] path): without it, blank emailBlocksJson silently skips
+        // slot-binding derivation and leaves slotBindingsJson='[]', which Validate later rejects as
+        // "no slots were chosen" with no diagnosable cause.
+        @InvocableVariable(label='Update Target Key')
+        public String updateTargetKey;
     }
 
     public class Result {
@@ -72,6 +88,13 @@ public with sharing class AssembleContentPlanAction {
         // personalizations. Pass straight through to Build Dynamic Email's personalizationsJson.
         @InvocableVariable(label='Personalizations JSON')
         public String personalizationsJson;
+
+        // UPDATE mode: derived {elementKey, slot} bindings mapping each surviving personalization
+        // axis to an EXISTING read-block slot -- computed HERE (not by an LLM tool the model never
+        // called). Each axis binds to the first eligible slot of its block type; axes with no
+        // eligible slot are dropped (harmlessly discards over-planned axes). "[]" for a new build.
+        @InvocableVariable(label='Slot Bindings JSON')
+        public String slotBindingsJson;
 
         @InvocableVariable(label='Error Message')
         public String errorMessage;
@@ -114,6 +137,23 @@ public with sharing class AssembleContentPlanAction {
         return out;
     }
 
+    // Map fieldApiName -> dataType (Text / Number / DateTime / ...) from the graph catalog, so a
+    // decision can carry its field's type and the criteria builder can emit a Number/Date predicate
+    // instead of always Text (the DC platform rejects a Text predicate on a numeric/date field:
+    // "Predicate type Text is not compatible with the data type of <field>").
+    private static Map<String, String> buildFieldDataTypeMap(String availableFieldsJson) {
+        Map<String, String> out = new Map<String, String>();
+        if (String.isBlank(availableFieldsJson)) { return out; }
+        try {
+            for (Object o : (List<Object>) JSON.deserializeUntyped(availableFieldsJson)) {
+                Map<String, Object> f = (Map<String, Object>) o;
+                Object fn = f.get('fieldApiName'); Object dt = f.get('dataType');
+                if (fn != null && dt != null) { out.put(String.valueOf(fn), String.valueOf(dt)); }
+            }
+        } catch (Exception ignore) { /* malformed catalog -> no types, defaults to Text downstream */ }
+        return out;
+    }
+
     // Human labels for a list of requested personalizations, for the drop/degrade note.
     private static String describeAxes(List<Object> personalizations) {
         List<String> labels = new List<String>();
@@ -152,8 +192,22 @@ public with sharing class AssembleContentPlanAction {
         'HasValue' => 'has_value', 'Equals' => 'equals', 'In' => 'in'
     };
 
+    // Sentinel blockDefinition for the subject-line + preheader COMPONENT (not a real block). A
+    // subject/preheader personalization targets email metadata, so its operation carries NO targetId
+    // and its variant body is {subjectLine, preheader} (captured from a real UI example). This sentinel
+    // flows through the same plan/assemble/validate/wire pipeline as a block def, and every block-lookup
+    // path guards against it (there is no block UUID to resolve).
+    public static final String SUBJECT_PREHEADER_DEF = 'sfdc_cms__subjectPreheader';
+
     private static final Map<String, String> SLOT_TYPE_TO_BLOCK_DEFINITION = new Map<String, String>{
-        'heading' => 'lightning/heading', 'paragraph' => 'lightning/paragraph', 'button' => 'lightning/actionButton'
+        'heading' => 'lightning/heading', 'paragraph' => 'lightning/paragraph', 'button' => 'lightning/actionButton',
+        // Image DC: an image slot is personalized by SWAPPING the asset per decision (a contentKey
+        // variant resolved from assetName), not by text. Build/Update already consume {assetName}
+        // variant objects; unlocking image here lets an image slot be planned/bound like a text one.
+        'image' => 'lightning/image',
+        // Subject/preheader DC: the email's subject line + preheader personalized TOGETHER as one
+        // component (update path only). No block, no slot number -- see SUBJECT_PREHEADER_DEF.
+        'subject_preheader' => 'sfdc_cms__subjectPreheader'
     };
 
     // Region -> 2-letter state-code sets. This is a DETERMINISTIC lookup, not a creative decision,
@@ -310,16 +364,57 @@ public with sharing class AssembleContentPlanAction {
             Result res = new Result();
             // Default non-null up front -- a null String/Boolean output binds to a null
             // agent-script variable (same hazard DataGraphDetailsAction documents), which then
-            // breaks downstream prompt/merge resolution.
+            // breaks downstream prompt/merge resolution. CRITICAL: personalizationsJson/elementsJson
+            // MUST default to "" -- if assemble throws (e.g. too many decisions), the catch returns
+            // without assigning them; a null then overwrites the agent's "" default, and the update
+            // gate's `!= ""` check passes on null -> the tool fires with a null required input ->
+            // REQUIRED_FIELD_MISSING (confirmed live). Defaulting here makes a thrown assemble leave
+            // them "" so the gate correctly stays closed.
             res.personalizationNote = '';
             res.needsGraphChoice = false;
+            res.personalizationsJson = '';
+            res.elementsJson = '';
+            res.slotBindingsJson = '[]';
+            res.title = ''; res.subjectLine = ''; res.preheader = ''; res.urlName = '';
+            // CRITICAL: errorMessage MUST default to '' -- on a SUCCESSFUL assemble it is otherwise
+            // never assigned and stays null. The pipeline binds base_error_pipeline = errorMessage, and
+            // the stall check `base_error_pipeline != ""` treats null as non-empty (null != "") -> it
+            // stalled a perfectly good assembled plan, skipping validate, so the confirm/update tool
+            // never appeared (confirmed live: assemble populated all outputs, then base_error_stalled
+            // flipped True on the very next step). Same null-vs-"" trap fixed for personalizationsJson.
+            res.errorMessage = '';
             try {
-                Map<String, Object> plan = (Map<String, Object>) JSON.deserializeUntyped(req.structurePlanJson);
-                Map<String, Object> copy = (Map<String, Object>) JSON.deserializeUntyped(req.copyJson);
+                Map<String, Object> plan = (Map<String, Object>) JSON.deserializeUntyped(AuraPocJson.stripFence(req.structurePlanJson));
+                Map<String, Object> copy = (Map<String, Object>) JSON.deserializeUntyped(AuraPocJson.stripFence(req.copyJson));
 
                 res.title = String.valueOf(copy.get('title'));
                 res.subjectLine = String.valueOf(copy.get('subjectLine'));
                 res.preheader = String.valueOf(copy.get('preheader'));
+
+                // Fail LOUD on a blank required meta field -- title/subjectLine/preheader are all
+                // REQUIRED inputs to Build Dynamic Email. If a copy fill came back empty, catch it
+                // here (where they're produced) rather than letting a blank sail through to a
+                // build-time "Missing required input parameter: subjectLine". BUILD only: an UPDATE
+                // reuses the existing email's title/subject/preheader, so a blank here is irrelevant
+                // to it -- requiring them would wrongly stall the update.
+                // An UPDATE is identified by EITHER real read blocks OR a set updateTargetKey. Keying off
+                // updateTargetKey too is important because base_update_emailBlocks does not always arrive
+                // at this call live (the Theory-A value-delivery issue) -- without it, a blank emailBlocksJson
+                // would make an update look like a build and wrongly demand title/subject/preheader.
+                Boolean isUpdate = (String.isNotBlank(req.emailBlocksJson) && req.emailBlocksJson != '[]')
+                    || String.isNotBlank(req.updateTargetKey);
+                if (!isUpdate) {
+                    List<String> blankMeta = new List<String>();
+                    if (String.isBlank(res.title) || res.title == 'null') { blankMeta.add('title'); }
+                    if (String.isBlank(res.subjectLine) || res.subjectLine == 'null') { blankMeta.add('subject line'); }
+                    if (String.isBlank(res.preheader) || res.preheader == 'null') { blankMeta.add('preheader'); }
+                    if (!blankMeta.isEmpty()) {
+                        throw new AssembleException('The generated copy is missing required text for: '
+                            + String.join(blankMeta, ', ') + '. Every email needs a title, subject line, and '
+                            + 'preheader -- re-run the plan so these are written.');
+                    }
+                }
+
                 res.urlName = slugify(res.title);
 
                 Map<String, Object> copyBySlot = copy.get('copyBySlot') instanceof Map<String, Object>
@@ -341,15 +436,24 @@ public with sharing class AssembleContentPlanAction {
 
                     // Deterministic asset gate (bulletproof step 2-3, image analogue of the
                     // data-graph gate below): an image slot is real only if the planner attached a
-                    // genuine CMS contentKey (starts with "MC"). The planner is instructed to omit
-                    // the image when no brand asset matches, but confirmed live it can still emit an
-                    // image slot with a blank/fabricated contentKey when the brand catalog came back
-                    // empty ([]). Drop the slot and note the omission here rather than let Build
-                    // Dynamic Email hard-fail the ENTIRE email on one bad contentKey -- graceful
-                    // degrade, not error, same as a dropped personalization axis.
+                    // resolvable asset REFERENCE -- an assetRole (logo/header) or an assetName -- NOT
+                    // a raw contentKey. The planner used to hand-type the MC-key, which a capable
+                    // model corrupted by a character (MC3.. vs the real MC4..); keys are now resolved
+                    // deterministically in Build Dynamic Email from role/name. A back-compat literal
+                    // contentKey is still accepted. When the slot carries none of these (planner had
+                    // no matching asset), drop it and note the omission rather than hard-failing the
+                    // whole email -- graceful degrade, same as a dropped personalization axis.
                     if (type == 'image') {
+                        String role = slot.get('assetRole') == null ? '' : String.valueOf(slot.get('assetRole')).trim();
+                        String assetName = slot.get('assetName') == null ? '' : String.valueOf(slot.get('assetName')).trim();
                         String ck = slot.get('contentKey') == null ? '' : String.valueOf(slot.get('contentKey'));
-                        if (!ck.startsWith('MC')) {
+                        // UPDATE image DC: an image slot that names an EXISTING real block (key slot<N>
+                        // present in the email's read blocks) needs no base asset ref -- the block's
+                        // current image stays as the default, and per-decision swaps come from the
+                        // personalizations. Only a BUILD-mode invented image slot (no such real block)
+                        // still requires a base asset, else it's dropped with a note as before.
+                        Boolean existingImageBlock = isExistingImageSlot(key, req.emailBlocksJson);
+                        if (!existingImageBlock && String.isBlank(role) && String.isBlank(assetName) && !ck.startsWith('MC')) {
                             structureNotes.add('The planned image "' + key + '" was omitted because no matching '
                                 + 'brand image asset was available; the email was built without it.');
                             continue;
@@ -363,8 +467,18 @@ public with sharing class AssembleContentPlanAction {
                     slotTypeByKey.put(key, type);
 
                     Map<String, Object> element = new Map<String, Object>{ 'key' => key, 'type' => type };
-                    if (type == 'image') {
-                        element.put('contentKey', slot.get('contentKey'));
+                    if (type == 'subject_preheader') {
+                        // The subject/preheader COMPONENT: no block, no base text/contentKey element --
+                        // the email's existing subjectLine/preheader stay as the default, and per-decision
+                        // {subjectLine, preheader} variants override them (wired with a targetId-less op in
+                        // Build). Nothing to put on the element beyond key+type.
+                    } else if (type == 'image') {
+                        // Carry the asset REFERENCE through to Build (which resolves it to a real
+                        // contentKey). Pass a literal contentKey too only if the planner supplied one
+                        // (back-compat); normally role/name is what's set.
+                        if (slot.get('assetRole') != null) { element.put('assetRole', slot.get('assetRole')); }
+                        if (slot.get('assetName') != null) { element.put('assetName', slot.get('assetName')); }
+                        if (slot.get('contentKey') != null) { element.put('contentKey', slot.get('contentKey')); }
                         element.put('altText', slot.get('altText'));
                         if (slot.get('widthPercent') != null) {
                             element.put('widthPercent', slot.get('widthPercent'));
@@ -474,6 +588,10 @@ public with sharing class AssembleContentPlanAction {
                     continue;
                 }
 
+                // Field -> dataType (Text/Number/DateTime), so each decision carries its field's type
+                // and the criteria builder emits a matching predicate (not always Text).
+                Map<String, String> fieldDataTypes = buildFieldDataTypeMap(req.availableFieldsJson);
+
                 // Group by (fieldApiName, scope) -- personalizations sharing a field+scope are
                 // branches of the SAME axis (e.g. three "Equals Industry" values); a different
                 // field/scope is a DIFFERENT axis and must become its own PersonalizationPoint.
@@ -519,6 +637,9 @@ public with sharing class AssembleContentPlanAction {
                     List<String> decisionNames = new List<String>();
                     Map<String, Set<String>> slotKeysByDecisionName = new Map<String, Set<String>>();
                     Set<String> targetSlotKeys = new Set<String>();
+                    // IMAGE DC: the asset the plan chose for each decision (from base_brand_context),
+                    // used to build {assetName} variants for an image slot instead of text.
+                    Map<String, String> assetByDecisionName = new Map<String, String>();
                     String seedFieldApiName = groupMembers[0].get('fieldApiName') == null ? '' : String.valueOf(groupMembers[0].get('fieldApiName'));
 
                     for (Map<String, Object> p : groupMembers) {
@@ -541,6 +662,11 @@ public with sharing class AssembleContentPlanAction {
                             'criteriaObjectApiName' => SCOPE_TO_OBJECT.get(scope),
                             'criteriaType' => MATCH_TYPE_TO_CRITERIA_TYPE.get(matchType)
                         };
+                        // Carry the field's data type so the criteria builder emits a Number/Date
+                        // predicate (not Text) for numeric/date fields -- the platform rejects a Text
+                        // predicate on e.g. ssot__AnnualRevenueAmount__c (Number).
+                        String fdt = fieldDataTypes.get(String.valueOf(p.get('fieldApiName')));
+                        if (String.isNotBlank(fdt)) { decision.put('dataType', fdt); }
                         if (SCOPE_TO_PATH.containsKey(scope)) {
                             decision.put('criteriaPath', SCOPE_TO_PATH.get(scope));
                         }
@@ -587,6 +713,12 @@ public with sharing class AssembleContentPlanAction {
                         }
                         decisions.add(decision);
                         decisionNames.add(name);
+                        // Capture the plan's chosen image asset for this decision (image DC). The plan
+                        // sets assetName on an image-slot personalization (an asset name picked from
+                        // base_brand_context); resolveVariantImageRefs later turns it into a contentKey.
+                        if (p.get('assetName') != null && String.isNotBlank(String.valueOf(p.get('assetName')))) {
+                            assetByDecisionName.put(name, String.valueOf(p.get('assetName')).trim());
+                        }
 
                         List<Object> appliesTo = p.get('appliesToSlots') instanceof List<Object>
                             ? (List<Object>) p.get('appliesToSlots') : new List<Object>();
@@ -613,11 +745,72 @@ public with sharing class AssembleContentPlanAction {
                             throw new AssembleException('Slot "' + slotKey + '" (type "' + slotType
                                 + '") cannot be personalized yet -- only heading, paragraph, and button slots support per-decision copy.');
                         }
+                        Boolean isImageSlot = (slotType == 'image');
+                        Boolean isSubjectPreheader = (slotType == 'subject_preheader');
                         Map<String, Object> copyForSlot = copyBySlot.get(slotKey) instanceof Map<String, Object>
                             ? (Map<String, Object>) copyBySlot.get(slotKey) : new Map<String, Object>();
                         Map<String, Object> byPersonalization = copyForSlot.get('byPersonalization') instanceof Map<String, Object>
                             ? (Map<String, Object>) copyForSlot.get('byPersonalization') : new Map<String, Object>();
                         Object defaultText = copyForSlot.get('default');
+
+                        // SUBJECT/PREHEADER DC: the component's per-decision variant is an object
+                        // {subjectLine, preheader} (FillCopy writes it into byPersonalization). The op is
+                        // targetId-less and the variant body is {subjectLine, preheader} (built in Build).
+                        // Each applicable decision carries its {subjectLine, preheader}; a decision that
+                        // doesn't apply here still needs a variant on this PP, so it gets an empty object
+                        // (Build falls back to the email's existing base subject/preheader for it).
+                        if (isSubjectPreheader) {
+                            Map<String, Object> spByDecision = new Map<String, Object>();
+                            for (String decisionName : decisionNames) {
+                                Set<String> appliesToThisSlot = slotKeysByDecisionName.get(decisionName);
+                                Boolean here = appliesToThisSlot != null && appliesToThisSlot.contains(slotKey);
+                                if (here && byPersonalization.get(decisionName) instanceof Map<String, Object>) {
+                                    Map<String, Object> sp = (Map<String, Object>) byPersonalization.get(decisionName);
+                                    Map<String, Object> variant = new Map<String, Object>();
+                                    if (sp.get('subjectLine') != null) { variant.put('subjectLine', sp.get('subjectLine')); }
+                                    if (sp.get('preheader') != null) { variant.put('preheader', sp.get('preheader')); }
+                                    if (variant.isEmpty()) {
+                                        throw new AssembleException('Subject/preheader personalization decision "'
+                                            + decisionName + '" has no subjectLine or preheader copy -- Write Email Copy '
+                                            + 'must write at least a subject line for each decision on this component.');
+                                    }
+                                    spByDecision.put(decisionName, variant);
+                                } else {
+                                    spByDecision.put(decisionName, new Map<String, Object>());  // keep base subject/preheader
+                                }
+                            }
+                            targets.add(new Map<String, Object>{
+                                'elementKey' => slotKey,
+                                'blockDefinition' => SUBJECT_PREHEADER_DEF,
+                                'textByDecision' => spByDecision
+                            });
+                            continue;
+                        }
+
+                        // IMAGE DC: an image slot's per-decision variant is an image SWAP, not text.
+                        // Each decision that applies here becomes {assetName:<the plan's chosen asset>}
+                        // (resolveVariantImageRefs turns assetName -> real contentKey against the brand
+                        // catalog, degrading if unresolvable). Decisions that don't apply to this image
+                        // slot get an empty object (keeps the block's base image). No copy text is
+                        // needed or expected for an image slot, so the text-coverage fail-loud is skipped.
+                        if (isImageSlot) {
+                            Map<String, Object> imgByDecision = new Map<String, Object>();
+                            for (String decisionName : decisionNames) {
+                                Set<String> appliesToThisSlot = slotKeysByDecisionName.get(decisionName);
+                                Boolean here = appliesToThisSlot != null && appliesToThisSlot.contains(slotKey);
+                                if (here && assetByDecisionName.containsKey(decisionName)) {
+                                    imgByDecision.put(decisionName, new Map<String, Object>{ 'assetName' => assetByDecisionName.get(decisionName) });
+                                } else {
+                                    imgByDecision.put(decisionName, new Map<String, Object>());  // keep base image
+                                }
+                            }
+                            targets.add(new Map<String, Object>{
+                                'elementKey' => slotKey,
+                                'blockDefinition' => 'lightning/image',
+                                'textByDecision' => imgByDecision
+                            });
+                            continue;
+                        }
 
                         Map<String, Object> textByDecision = new Map<String, Object>();
                         for (String decisionName : decisionNames) {
@@ -672,6 +865,58 @@ public with sharing class AssembleContentPlanAction {
                     });
                 }
 
+                // UPDATE mode: DERIVE slot bindings here (the LLM never calls a slot tool reliably).
+                // Match each axis's target to the first eligible read-block slot of its type; drop
+                // axes with no eligible slot (harmlessly discarding over-planned ones). Rewrites
+                // ppSpecs to only the bound axes and emits the {elementKey, slot} bindings.
+                res.slotBindingsJson = '[]';
+                // SELF-HEAL the Theory-A stall: an update (updateTargetKey set) can reach assembly with a
+                // BLANK emailBlocksJson even though the agent read the email earlier -- the bound
+                // base_update_emailBlocks value does not always arrive at this action call (a live
+                // value-delivery timing issue, proven repeatedly: the identical plan+blocks bind fine in
+                // anon-Apex but live emailBlocksJson is empty here). Rather than fail loud (which stalls
+                // the whole update), RE-READ the blocks straight from updateTargetKey so derivation always
+                // has them. ReadDynamicEmailAction is a plain Apex call (no agent-runtime dependency).
+                String effectiveBlocks = req.emailBlocksJson;
+                // The passed-through base_update_emailBlocks is UNRELIABLE for real emails: the agent
+                // runtime corrupts the JSON escaping of complex block text (HTML footers with quotes,
+                // {!$merge} fields) so it fails to parse (proven live: JSONException "expecting comma"
+                // at col 804 inside slot-4/5 HTML) -- even though ReadDynamicEmailAction serializes it
+                // cleanly. So for an update, re-read the blocks directly from updateTargetKey (a plain
+                // Apex call whose JSON.serialize output is always valid) whenever the passed value is
+                // blank OR does not parse. This makes slot derivation robust to the runtime corruption.
+                if (String.isNotBlank(req.updateTargetKey) && !ppSpecs.isEmpty()) {
+                    Boolean passedParses = false;
+                    if (String.isNotBlank(effectiveBlocks) && effectiveBlocks != '[]') {
+                        try { Object p = JSON.deserializeUntyped(AuraPocJson.stripFence(effectiveBlocks));
+                              passedParses = (p instanceof List<Object>); } catch (Exception e) { passedParses = false; }
+                    }
+                    if (!passedParses) {
+                        try {
+                            ReadDynamicEmailAction.Request rr = new ReadDynamicEmailAction.Request();
+                            rr.contentKey = req.updateTargetKey;
+                            List<ReadDynamicEmailAction.Result> rres =
+                                ReadDynamicEmailAction.readDynamicEmail(new List<ReadDynamicEmailAction.Request>{ rr });
+                            if (rres != null && !rres.isEmpty() && String.isNotBlank(rres[0].blocksJson)) {
+                                effectiveBlocks = rres[0].blocksJson;
+                            }
+                        } catch (Exception e) { /* surfaced below */ }
+                    }
+                    if (String.isBlank(effectiveBlocks) || effectiveBlocks == '[]') {
+                        throw new AssembleException('Update to "' + req.updateTargetKey + '" reached assembly but '
+                            + 'the email\'s blocks were not provided and could not be re-read, so no slot could be bound.');
+                    }
+                }
+                if (String.isNotBlank(effectiveBlocks) && effectiveBlocks != '[]' && !ppSpecs.isEmpty()) {
+                    // MULTI-SLOT update: bind each planned axis to its explicitly-named real slot. We no
+                    // longer prune to a single "primary" axis -- that was a guard against the create-
+                    // planner over-planning an update, made obsolete by the UPDATE-MODE prompt (which
+                    // plans ONLY the user's chosen slots) and harmful to legitimate multi-slot requests
+                    // (it dropped every axis but one). deriveUpdateSlotBindings already drops a genuine
+                    // collision (two different-field axes on the SAME slot -- the platform's hard limit)
+                    // via its usedSlots tracking, so the one thing prune protected against is still safe.
+                    ppSpecs = deriveUpdateSlotBindings(ppSpecs, effectiveBlocks, res);
+                }
                 res.personalizationsJson = JSON.serialize(ppSpecs);
                 // Deterministic PP/OP/slot summary for the confirm dialog -- with the slot
                 // name + type each axis targets, not just a count.
@@ -719,5 +964,179 @@ public with sharing class AssembleContentPlanAction {
             results.add(res);
         }
         return results;
+    }
+
+    // UPDATE-mode slot derivation. For each planned axis, bind its target(s) to the FIRST eligible
+    // existing slot of the matching block type; an axis whose target(s) can't ALL be bound is dropped
+    // (harmlessly discards over-planned axes the user didn't ask for). Returns the surviving ppSpecs
+    // and sets res.slotBindingsJson = [{elementKey, slot}]. emailBlocksJson is ReadDynamicEmailAction
+    // output: [{slot, id, def, personalized}] over content blocks, in order.
+    // If an elementKey is an explicit real slot reference "slot<N>" (as UPDATE-MODE emits, e.g. "slot4"),
+    // return N; otherwise null (a create-style descriptive key like "greeting_paragraph").
+    private static Integer explicitSlotNumber(String elementKey) {
+        if (String.isBlank(elementKey)) { return null; }
+        Matcher m = Pattern.compile('(?i)^slot(\\d+)$').matcher(elementKey.trim());
+        return m.matches() ? Integer.valueOf(m.group(1)) : null;
+    }
+
+    // True when slotKey is "slot<N>" and block N in the email's read blocks is an existing image block.
+    // Lets an UPDATE personalize an existing image slot without a base asset ref (image DC).
+    private static Boolean isExistingImageSlot(String slotKey, String emailBlocksJson) {
+        Integer n = explicitSlotNumber(slotKey);
+        if (n == null || String.isBlank(emailBlocksJson)) { return false; }
+        try {
+            for (Object o : (List<Object>) JSON.deserializeUntyped(AuraPocJson.stripFence(emailBlocksJson))) {
+                if (!(o instanceof Map<String, Object>)) { continue; }
+                Map<String, Object> b = (Map<String, Object>) o;
+                if (b.get('slot') != null && Integer.valueOf(String.valueOf(b.get('slot'))) == n) {
+                    return String.valueOf(b.get('def')) == 'lightning/image';
+                }
+            }
+        } catch (Exception ignore) { }
+        return false;
+    }
+
+    private static List<Object> deriveUpdateSlotBindings(List<Object> ppSpecs, String emailBlocksJson, Result res) {
+        // Ordered eligible slots per block definition (skip already-personalized), plus per-slot
+        // def + personalized maps so an EXPLICIT slotN request can be honored (or rejected) exactly.
+        Map<String, List<Integer>> freeSlotsByDef = new Map<String, List<Integer>>();
+        Map<Integer, String> defBySlot = new Map<Integer, String>();
+        Map<Integer, Boolean> personalizedBySlot = new Map<Integer, Boolean>();
+        try {
+            for (Object o : (List<Object>) JSON.deserializeUntyped(AuraPocJson.stripFence(emailBlocksJson))) {
+                if (!(o instanceof Map<String, Object>)) { continue; }
+                Map<String, Object> b = (Map<String, Object>) o;
+                if (b.get('slot') == null || b.get('def') == null) { continue; }
+                Integer sn = Integer.valueOf(String.valueOf(b.get('slot')));
+                String def = String.valueOf(b.get('def'));
+                defBySlot.put(sn, def);
+                personalizedBySlot.put(sn, b.get('personalized') == true);
+                if (b.get('personalized') == true) { continue; }   // ineligible: already has DC
+                if (!freeSlotsByDef.containsKey(def)) { freeSlotsByDef.put(def, new List<Integer>()); }
+                freeSlotsByDef.get(def).add(sn);
+            }
+        } catch (Exception ignore) { return ppSpecs; /* unparseable -> leave plan as-is, validation backstops */ }
+
+        List<Object> keptPpSpecs = new List<Object>();
+        List<Object> bindings = new List<Object>();
+        List<String> droppedLabels = new List<String>();
+        // Track which slot index we've consumed per def (for non-explicit keys), and which concrete
+        // slot numbers are already bound this pass (so two axes never double-book a slot).
+        Map<String, Integer> nextIdxByDef = new Map<String, Integer>();
+        Set<Integer> usedSlots = new Set<Integer>();
+
+        for (Object ppObj : ppSpecs) {
+            Map<String, Object> pp = (Map<String, Object>) ppObj;
+            List<Object> targets;
+            try { targets = (List<Object>) JSON.deserializeUntyped(String.valueOf(pp.get('targetsJson'))); }
+            catch (Exception ignore) { targets = new List<Object>(); }
+
+            // Bind EVERY target of this axis. An explicit slotN elementKey binds to EXACTLY slot N
+            // (and is rejected if N is missing, already personalized, an image, or its real def does
+            // not match the target's block type) -- so a request for a specific slot is honored or
+            // cleanly dropped, never silently rebound to a different slot (the EC3 bug). A
+            // non-explicit key (e.g. a create-style "greeting_paragraph") falls back to the first
+            // free slot of its type.
+            List<Object> axisBindings = new List<Object>();
+            Boolean allBound = !targets.isEmpty();
+            Boolean targetsCorrected = false;
+            for (Object tObj : targets) {
+                Map<String, Object> t = (Map<String, Object>) tObj;
+                String ek = String.valueOf(t.get('elementKey'));
+                String def = t.get('blockDefinition') == null ? '' : String.valueOf(t.get('blockDefinition'));
+                // SUBJECT/PREHEADER component: not a block, no slot number to bind. It targets email
+                // metadata via a targetId-less op (built in Build), so there is nothing to resolve here
+                // -- pass it through as bound (no {elementKey,slot} entry) so the axis is kept, not dropped.
+                if (def == SUBJECT_PREHEADER_DEF || ek == 'subject_preheader') {
+                    continue;
+                }
+                Integer explicit = explicitSlotNumber(ek);
+                if (explicit != null) {
+                    // Honor the exact slot the user named. The SLOT NUMBER is authoritative; its TYPE
+                    // is whatever the real block is -- NOT the plan's "type" (the create-planner often
+                    // defaults an un-stated type to "paragraph", so a heading/button/IMAGE slot would
+                    // carry the wrong blockDefinition and fail to bind). So: require the slot exists, is
+                    // unpersonalized, and not already used -- and take the def from the REAL block,
+                    // correcting the target's blockDefinition. IMAGE slots ARE now bindable (image DC:
+                    // the swap-per-decision engine in resolveVariantImageRefs handles image variants);
+                    // an image target's per-decision variants are {assetName} objects, not text.
+                    String realDef = defBySlot.get(explicit);
+                    Boolean eligible = defBySlot.containsKey(explicit)
+                            && personalizedBySlot.get(explicit) != true
+                            && !usedSlots.contains(explicit)
+                            && realDef != null;
+                    if (eligible) {
+                        // IMAGE-DC: when the real block is an image, this target is an image SWAP -- its
+                        // per-decision variants become {assetName}/{assetRole}/{contentKey} image objects.
+                        // We do NOT require the plan to have named an asset here: if a decision has no
+                        // asset (the planner typed the slot as text, or typed it image but picked no asset
+                        // because none thematically fit the axis), Build's resolveVariantImageRefs
+                        // deterministically auto-assigns a distinct catalog image per decision -- so the
+                        // swap still works and shows a different picture per audience. The only genuine
+                        // failure (org has zero image assets at all) is raised there with a clear message.
+                        // We just correct the block type below so Build treats it as an image target.
+                        if (realDef != def) {
+                            t.put('blockDefinition', realDef);
+                            targetsCorrected = true;   // correct the plan's guessed type
+                            // If we corrected a TEXT target to image, its textByDecision holds copy
+                            // STRINGS (from the plan's byPersonalization). resolveVariantImageRefs only
+                            // processes image OBJECT variants, so rewrite each decision to an empty image
+                            // object {} -- the auto-assign there then fills a distinct catalog image.
+                            if (realDef == 'lightning/image') {
+                                Object tbd = t.get('textByDecision');
+                                if (tbd instanceof Map<String, Object>) {
+                                    Map<String, Object> byDec = (Map<String, Object>) tbd;
+                                    for (String dkey : new List<String>(byDec.keySet())) {
+                                        if (!(byDec.get(dkey) instanceof Map<String, Object>)) {
+                                            byDec.put(dkey, new Map<String, Object>());  // empty image variant -> auto-assigned
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        axisBindings.add(new Map<String, Object>{ 'elementKey' => ek, 'slot' => explicit });
+                        usedSlots.add(explicit);
+                    } else {
+                        allBound = false;   // requested slot not eligible (missing / image / personalized) -> drop, no rebind
+                    }
+                } else {
+                    List<Integer> free = freeSlotsByDef.get(def);
+                    Integer idx = nextIdxByDef.containsKey(def) ? nextIdxByDef.get(def) : 0;
+                    // advance past any slots already used by an explicit binding
+                    while (free != null && idx < free.size() && usedSlots.contains(free[idx])) { idx++; }
+                    if (free != null && idx < free.size()) {
+                        axisBindings.add(new Map<String, Object>{ 'elementKey' => ek, 'slot' => free[idx] });
+                        usedSlots.add(free[idx]);
+                        nextIdxByDef.put(def, idx + 1);
+                    } else {
+                        allBound = false;   // no eligible slot of this type left
+                    }
+                }
+            }
+
+            if (allBound) {
+                // If we corrected any target's blockDefinition to the real block type, write the
+                // updated targets back into the ppSpec so the downstream update targets the right block.
+                if (targetsCorrected) { pp.put('targetsJson', JSON.serialize(targets)); }
+                keptPpSpecs.add(pp);
+                bindings.addAll(axisBindings);
+            } else {
+                droppedLabels.add(String.valueOf(pp.get('ppLabel')));
+                // Release any slots this dropped axis had reserved, so a later kept axis can use them.
+                for (Object bObj : axisBindings) {
+                    Object sn = ((Map<String,Object>) bObj).get('slot');
+                    if (sn != null) { usedSlots.remove(Integer.valueOf(String.valueOf(sn))); }
+                }
+            }
+        }
+
+        res.slotBindingsJson = JSON.serialize(bindings);
+        if (!droppedLabels.isEmpty()) {
+            String note = 'These personalizations were skipped -- no eligible (unpersonalized) slot of '
+                + 'the matching type: ' + String.join(droppedLabels, ', ') + '.';
+            res.personalizationNote = String.isBlank(res.personalizationNote) ? note
+                : (res.personalizationNote + ' ' + note);
+        }
+        return keptPpSpecs;
     }
 }

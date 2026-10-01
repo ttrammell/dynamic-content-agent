@@ -1,0 +1,441 @@
+<template>
+    <div class="slds-p-around_medium slds-scrollable_y" style="max-height: 100%;">
+        <template if:true={loading}>
+            <lightning-spinner alternative-text="Loading" size="small"></lightning-spinner>
+        </template>
+
+        <!-- Panel header: what this is, above the tabs, with a link out to the toolkit. -->
+        <div class="panel-head">
+            <div class="panel-head-text">
+                <p class="panel-title">Agent Panel</p>
+                <p class="panel-desc">
+                    Companion for the Dynamic Content agent. Explore dynamic content in this email
+                    and check setup and health for the agent.
+                </p>
+            </div>
+            <div class="panel-head-side">
+                <a href="https://sfdc.co/se-toolkit" target="_blank" class="panel-about">About this panel ↗</a>
+                <!-- Always-present editor refresh; glows when the live-update poll detects the email
+                     changed server-side (an agent update). Reloads the editor to pull it in. -->
+                <button type="button" class={refreshBtnClass} title={refreshTitle} onclick={refreshEditor}>
+                    <span class="refresh-ico">⟳</span> Refresh
+                </button>
+            </div>
+        </div>
+        <template if:true={serverChangeAvailable}>
+            <p class="update-ready-hint">Agent update detected — Refresh to see it in the editor.</p>
+        </template>
+
+        <!-- Editor refresh after an agent update: the agent changes the email server-side; the open
+             editor doesn't see it until reloaded. The poll flags when a change is available; the button
+             reloads the editor to pull it in. (In-place repaint via updateContent isn't supported for the
+             rich email content type, so we reload.) -->
+        <!-- Talk-to-the-agent bridge: the agent can't see this editor frame, so hand it the open
+             email's real content key. One click copies a ready-to-paste prompt (or just the key).
+             An always-present Refresh reloads the editor to pull in a server-side agent change; it
+             glows when the live-update poll detects the email changed underneath the open editor. -->
+        <template if:true={hasCurrentEmail}>
+            <div class="email-bridge">
+                <div class="email-bridge-row">
+                    <span class="email-bridge-label">This email</span>
+                    <span class="email-bridge-key" title={currentEmailKey}>{currentEmailKey}</span>
+                    <!-- inline copy-key: small icon button right next to the key value -->
+                    <button type="button" class="key-copy-btn" title="Copy key" onclick={handleCopyKey}>
+                        <template if:false={keyCopied}><span class="copy-ico">⧉</span></template>
+                        <template if:true={keyCopied}><span class="copy-ok">✓</span></template>
+                    </button>
+                </div>
+
+                <!-- Compact brand logo/header thumbnails, right below the key. Small horizontal strip. -->
+                <template if:true={hasAssets}>
+                    <div class="email-bridge-assets">
+                        <template for:each={assetRows} for:item="a">
+                            <span key={a.key} class="bridge-asset" title={a.name}>
+                                <template if:true={a.hasThumb}>
+                                    <img src={a.thumb} alt={a.name} class="bridge-asset-thumb" />
+                                </template>
+                                <template if:false={a.hasThumb}>
+                                    <span class="bridge-asset-swatch" title="Brand record">{a.initial}</span>
+                                </template>
+                                <span class="bridge-asset-role">{a.role}</span>
+                            </span>
+                        </template>
+                    </div>
+                </template>
+
+                <!-- Prompt buttons: each copies a ready-to-paste agent prompt. Agent Prompt is live;
+                     Translate / Industry DC / B2B / B2C are gated off for now (enabled later once the
+                     panel can confirm the bound data graph's fields support them). -->
+                <div class="email-bridge-actions">
+                    <button type="button" class="bridge-btn bridge-btn_primary" onclick={handleCopyPrompt}>
+                        <span class="copy-ico">⧉</span>
+                        <template if:false={promptCopied}>Prompt</template>
+                        <template if:true={promptCopied}>Copied ✓</template>
+                    </button>
+                    <button type="button" class="bridge-btn" onclick={handleCopyTranslate} title="Copy a ready translate prompt">
+                        <span class="copy-ico">⧉</span>
+                        <template if:false={translateCopied}>Translate</template>
+                        <template if:true={translateCopied}>Copied ✓</template>
+                    </button>
+                    <button type="button" class="bridge-btn" onclick={handleCopyB2b}
+                            disabled={industryDcDisabled} title={industryGateTitle}>
+                        <span class="copy-ico">⧉</span>
+                        <template if:false={b2bCopied}>B2B</template>
+                        <template if:true={b2bCopied}>Copied ✓</template>
+                    </button>
+                    <button type="button" class="bridge-btn" onclick={handleCopyB2c}
+                            disabled={industryDcDisabled} title={industryGateTitle}>
+                        <span class="copy-ico">⧉</span>
+                        <template if:false={b2cCopied}>B2C</template>
+                        <template if:true={b2cCopied}>Copied ✓</template>
+                    </button>
+                </div>
+                <p class="email-bridge-hint">
+                    Paste into the DC Agent so it reads <em>this</em> email — the agent runs separately and
+                    can't see the editor.
+                </p>
+
+                <template if:true={copyFailed}>
+                    <p class="email-bridge-hint email-bridge-hint_err">
+                        Couldn't copy automatically — select the key above and copy it manually.
+                    </p>
+                </template>
+            </div>
+        </template>
+
+        <lightning-tabset variant="scoped">
+
+            <!-- Tab 1: DC in This Email — summary widgets + detail cards (read in-frame) -->
+            <lightning-tab label="DC in This Email" value="dc">
+                <div class="slds-p-around_x-small">
+                    <template if:true={waitingForEditor}>
+                        <div class="card card_soft card-pad slds-text-body_regular" role="status">
+                            <p>Waiting for the editor to report the open content…</p>
+                        </div>
+                    </template>
+
+                    <template if:false={waitingForEditor}>
+                        <!-- Widgets -->
+                        <div class="counts">
+                            <template for:each={dcSummaryTiles} for:item="t">
+                                <div key={t.key} class="count-chip">
+                                    <template if:false={t.isText}>
+                                        <span class="count-num count-num_accent">{t.num}</span>
+                                    </template>
+                                    <template if:true={t.isText}>
+                                        <span class="count-brand count-num_accent" title={t.text}>{t.text}</span>
+                                    </template>
+                                    <span class="count-label">{t.label}</span>
+                                </div>
+                            </template>
+                        </div>
+
+                        <template if:false={isPersonalized}>
+                            <div class="card card_soft card-pad slds-text-body_small" role="status">
+                                <p>No dynamic content is wired into this content — it will send as a static email.</p>
+                            </div>
+                        </template>
+
+                        <!-- PersonalizationPoints — decision-table preview (PP → Op → decision→variant
+                             rows), COLLAPSIBLE, shown ABOVE slot roles. PP headers from GraphQL;
+                             ops/decisions/variants from the in-frame body. -->
+                        <template if:true={hasPpTree}>
+                            <div class="section-head">
+                                <p class="section-title">Personalization Points</p>
+                                <button class="bridge-btn section-toggle" onclick={togglePps}>
+                                    <template if:true={showPps}>Hide</template>
+                                    <template if:false={showPps}>Show</template>
+                                </button>
+                            </div>
+                            <template if:true={showPps}>
+                                <template for:each={ppTree} for:item="pp">
+                                    <div key={pp.key} class="pp-node">
+                                        <div class="pp-node-head">
+                                            <span class="pp-kind">PP</span>
+                                            <span class="pp-name">{pp.label}</span>
+                                            <span class={pp.badgeClass}>{pp.badgeText}</span>
+                                            <template if:true={pp.hasSchema}>
+                                                <span class="pp-meta">{pp.schema}</span>
+                                            </template>
+                                            <span class="pp-ops">{pp.opSummary}</span>
+                                        </div>
+
+                                        <template if:true={pp.hasOps}>
+                                            <template for:each={pp.ops} for:item="op">
+                                                <div key={op.key} class="pp-op">
+                                                    <div class="pp-op-head">
+                                                        <span class="pp-op-tag">Op {op.index}</span>
+                                                        <template if:true={op.slotLabel}>
+                                                            <span class="pp-op-slot">{op.slotLabel}</span>
+                                                        </template>
+                                                        <span class="pp-op-target">swaps {op.targetLabel}</span>
+                                                        <span class="pp-op-sub">{op.decisionLabel}</span>
+                                                    </div>
+                                                    <div class="dc-table">
+                                                        <template for:each={op.rows} for:item="row">
+                                                            <div key={row.key} class="dc-row">
+                                                                <span class="dc-dec">{row.decisionName}</span>
+                                                                <span class="dc-arrow">→</span>
+                                                                <span class="dc-var">{row.variantName}</span>
+                                                            </div>
+                                                        </template>
+                                                    </div>
+                                                </div>
+                                            </template>
+                                        </template>
+
+                                        <template if:false={pp.hasOps}>
+                                            <div class="pp-op-empty">
+                                                Declared on this content but no swaps are wired into the body yet.
+                                            </div>
+                                        </template>
+                                    </div>
+                                </template>
+                            </template>
+                        </template>
+
+                        <!-- Slot roles — how each content block is classified (logo / image / text /
+                             footer). Logo + footer are NOT offered for content-axis personalization; this
+                             read-only readout explains the agent's eligible set. Mirrors the server heuristic. -->
+                        <template if:true={hasSlotRoles}>
+                            <div class="section-head">
+                                <p class="section-title">Slot roles</p>
+                                <button class="bridge-btn section-toggle" onclick={toggleSlotRoles}>
+                                    <template if:true={showSlotRoles}>Hide</template>
+                                    <template if:false={showSlotRoles}>Show</template>
+                                </button>
+                            </div>
+                            <template if:true={showSlotRoles}>
+                                <template for:each={slotRoles} for:item="s">
+                                    <div key={s.key} class="slot-role-row">
+                                        <span class="slot-role-num">slot {s.slot}</span>
+                                        <span class="slot-role-kind">{s.kind}</span>
+                                        <span class={s.roleClass}>{s.role}</span>
+                                        <template if:true={s.alreadyDc}>
+                                            <span class="slot-role-dc">has DC</span>
+                                        </template>
+                                        <template if:true={s.showRoleNote}>
+                                            <span class="slot-role-note">not personalized by audience</span>
+                                        </template>
+                                    </div>
+                                </template>
+                            </template>
+                        </template>
+
+                        <!-- Plan preview (Feature 3): dry-run a candidate axis; shows which slots WILL
+                             bind before the user approves the agent's write. No LLM, no write. Sits with
+                             the slot-roles area (it's about which slots would bind). -->
+                        <template if:true={hasCurrentEmail}>
+                            <div class="card card_soft preview-card">
+                                <div class="qa-row preview-head">
+                                    <span class="preview-title">Plan preview</span>
+                                </div>
+                                <div class="preview-body">
+                                    <p class="preview-hint">Check which slot(s) will bind for a candidate
+                                        personalization before you apply it in the agent.</p>
+                                    <lightning-input class="preview-input" label="Slot(s)"
+                                        placeholder="e.g. 4 or 4,5" value={previewSlots}
+                                        onchange={handlePreviewSlots} field-level-help={eligibleSlotHint}>
+                                    </lightning-input>
+                                    <template if:true={eligibleSlotHint}>
+                                        <p class="preview-elig">{eligibleSlotHint}</p>
+                                    </template>
+                                    <lightning-input class="preview-input" label="Personalize by (field API name)"
+                                        placeholder="e.g. ssot__PrimaryIndustry__c" value={previewField}
+                                        onchange={handlePreviewField}></lightning-input>
+                                    <lightning-input class="preview-input" label="Values (optional, comma-separated)"
+                                        placeholder="e.g. Healthcare, Technology, Finance" value={previewValues}
+                                        onchange={handlePreviewValues}></lightning-input>
+                                    <lightning-button label="Preview" onclick={runPreview}
+                                        disabled={previewRunning} variant="brand" class="preview-run">
+                                    </lightning-button>
+                                    <template if:true={previewRunning}>
+                                        <span class="preview-checking">Checking…</span>
+                                    </template>
+
+                                    <template if:true={previewHasResult}>
+                                        <template if:true={previewError}>
+                                            <div class="qa-row card_warn preview-err">{previewError}</div>
+                                        </template>
+                                        <template if:false={previewError}>
+                                            <div class={previewValidClass}>{previewValidLabel}</div>
+                                            <template if:true={previewBindList.length}>
+                                                <p class="preview-label">Will bind:</p>
+                                                <ul class="preview-list">
+                                                    <template for:each={previewBindList} for:item="b">
+                                                        <li key={b.key}>slot {b.slot}</li>
+                                                    </template>
+                                                </ul>
+                                            </template>
+                                            <template if:true={previewDecisionList.length}>
+                                                <p class="preview-label">Decisions:</p>
+                                                <ul class="preview-list">
+                                                    <template for:each={previewDecisionList} for:item="d">
+                                                        <li key={d.key}>{d.label}</li>
+                                                    </template>
+                                                </ul>
+                                            </template>
+                                            <template if:true={previewHasWarnings}>
+                                                <p class="preview-label">Notes:</p>
+                                                <ul class="preview-list preview-warns">
+                                                    <template for:each={previewWarnList} for:item="w">
+                                                        <li key={w.key}>{w.label}</li>
+                                                    </template>
+                                                </ul>
+                                            </template>
+                                            <template if:true={previewSummary}>
+                                                <p class="preview-summary">{previewSummary}</p>
+                                            </template>
+                                        </template>
+                                    </template>
+                                </div>
+                            </div>
+                        </template>
+
+                        <!-- (Brand/logo/header assets moved up to the "This email" section, below the key.) -->
+                    </template>
+                </div>
+            </lightning-tab>
+
+            <!-- Tab 2: Setup — install checklist (readinessRows) + env health + models + connection test -->
+            <lightning-tab label="Setup" value="cfg">
+                <div class="slds-p-around_x-small">
+                    <!-- Detection banner: collapses the walkthrough once setup is done -->
+                    <div class={setupBannerClass} role="status">
+                        <span>{setupBannerText}</span>
+                        <template if:false={setupComplete}>
+                            <span class="setup-remaining">{remainingCount} step(s) left</span>
+                        </template>
+                        <template if:true={setupComplete}>
+                            <button type="button" class="link-btn" onclick={toggleSetupSteps}>
+                                {toggleLabel}
+                            </button>
+                        </template>
+                    </div>
+
+                    <!-- Auto-checked steps: shown while incomplete, hidden (toggle) once complete -->
+                    <template if:true={showWalkthrough}>
+                        <p class="section-title">Finish setup (auto-checked)</p>
+                        <template for:each={detectableRows} for:item="r">
+                            <div key={r.key} class={r.rowClass}>
+                                <span class="qa-step">{r.order}.</span>
+                                <span class="qa-label">{r.label}</span>
+                                <template if:true={r.detail}>
+                                    <span class="qa-detail">{r.detail}</span>
+                                </template>
+                                <span class={r.statusClass}>{r.statusText}</span>
+                                <template if:true={r.hasFix}>
+                                    <a href={r.fixUrl} target="_blank" class="qa-fix">
+                                        Open {r.fixLabel} ↗
+                                    </a>
+                                </template>
+                            </div>
+                        </template>
+                    </template>
+
+                    <!-- Manual reference steps: done in Setup / CLI, NOT verifiable from this panel, so
+                         they always list here as guidance (not pending checklist items). Always shown. -->
+                    <template if:true={hasManualRows}>
+                        <p class="section-title">Manual steps (done in Setup / CLI — not auto-checked)</p>
+                        <template for:each={manualRows} for:item="r">
+                            <div key={r.key} class={r.rowClass}>
+                                <span class="qa-step">•</span>
+                                <span class="qa-label">{r.label}</span>
+                                <template if:true={r.detail}>
+                                    <span class="qa-detail">{r.detail}</span>
+                                </template>
+                                <template if:true={r.hasFix}>
+                                    <a href={r.fixUrl} target="_blank" class="qa-fix">
+                                        Open {r.fixLabel} ↗
+                                    </a>
+                                </template>
+                            </div>
+                        </template>
+                    </template>
+
+                    <template if:true={hasEnvHealth}>
+                        <p class="section-title">Environment health</p>
+                        <template for:each={envHealthRows} for:item="r">
+                            <div key={r.key} class={r.rowClass}>
+                                <span>{r.label}</span>
+                                <template if:true={r.detail}><span class="qa-detail">{r.detail}</span></template>
+                                <span class={r.statusClass}>{r.statusText}</span>
+                            </div>
+                        </template>
+                    </template>
+
+                    <!-- Read-only browse dropdowns for brands + CMS workspaces -->
+                    <template if:true={hasBrands}>
+                        <lightning-combobox class="slds-m-top_x-small" label={brandDropdownLabel}
+                            placeholder="Browse brands…" options={brandOptions}
+                            value={selectedBrand} onchange={handleBrandChange}></lightning-combobox>
+                    </template>
+                    <template if:true={hasWorkspaces}>
+                        <lightning-combobox class="slds-m-top_x-small" label={workspaceDropdownLabel}
+                            placeholder="Browse workspaces…" options={workspaceOptions}
+                            value={selectedWorkspace} onchange={handleWorkspaceChange}></lightning-combobox>
+                    </template>
+
+                    <lightning-button label="Run full test (auth · workspace · Aura)" variant="brand"
+                        onclick={runTest} class="slds-m-top_x-small"></lightning-button>
+
+                    <template if:true={testResult}>
+                        <!-- One-line verdict, always visible after a run -->
+                        <div class={testSummaryClass} role="status">
+                            <span>{testSummaryText}</span>
+                            <span class="test-ranat">{testRanAtLabel}</span>
+                        </div>
+
+                        <!-- Email-capable workspaces (read-only); auto-selected one marked -->
+                        <template if:true={hasWorkspaceRows}>
+                            <p class="section-title">Email-capable workspaces</p>
+                            <template for:each={workspaceRows} for:item="w">
+                                <div key={w.id} class={w.rowClass}>
+                                    <span class="ws-name">{w.name}</span>
+                                    <template if:true={w.recommended}>
+                                        <span class="ws-badge">{w.badge}</span>
+                                    </template>
+                                </div>
+                            </template>
+                        </template>
+
+                        <!-- Full diagnostic behind a toggle, collapsed by default -->
+                        <button type="button" class="link-btn slds-m-top_x-small" onclick={toggleTestDetails}>
+                            {testDetailsLabel}
+                        </button>
+                        <template if:true={showTestDetails}>
+                            <div class="card card_soft card-pad slds-m-top_x-small slds-text-body_small">
+                                <lightning-formatted-text value={testResult.diagnostic}></lightning-formatted-text>
+                            </div>
+                        </template>
+                    </template>
+
+                    <template if:true={models}>
+                        <p class="section-title">Models used by the agent</p>
+                        <div class="card card-pad">
+                            <ul class="slds-list_dotted slds-text-body_small">
+                                <template for:each={selectedModels} for:item="m">
+                                    <li key={m.template}>{m.step} — {m.friendly}</li>
+                                </template>
+                            </ul>
+                        </div>
+                        <template if:true={catalogSetupUrl}>
+                            <p class="slds-text-body_small slds-m-top_x-small">
+                                For this org's full model catalog,
+                                <a href={catalogSetupUrl} target="_blank">open Setup → Einstein Prompt Studio ↗</a>.
+                            </p>
+                        </template>
+                    </template>
+
+                </div>
+            </lightning-tab>
+
+        </lightning-tabset>
+
+        <template if:true={error}>
+            <div class="slds-notify slds-notify_alert slds-alert_error slds-m-top_small" role="alert">
+                <span>{error}</span>
+            </div>
+        </template>
+    </div>
+</template>

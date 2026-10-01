@@ -11,14 +11,21 @@
     </types>
     <types>
         <members>AssembleContentPlanAction</members>
+        <members>AuraPocJson</members>
         <members>AuthDiagnosticAction</members>
         <members>BuildDynamicEmailAction</members>
         <members>ConfirmBuildAction</members>
         <members>DataGraphDetailsAction</members>
+        <members>DcPreflightController</members>
+        <members>ExpandUpdatePlanSlotsAction</members>
         <members>FillCopyAction</members>
         <members>FindBrandAssetsAction</members>
         <members>FindBrandRecordAction</members>
+        <members>GetAssetCatalogAction</members>
+        <members>PlanEmailUpdateAction</members>
+        <members>ReadDynamicEmailAction</members>
         <members>ResolveBrandingAction</members>
+        <members>UpdateDynamicEmailAction</members>
         <members>ValidateContentPlanAction</members>
         <members>AuraPocTokenProvider</members>
         <members>AuraPocTokenSource</members>
@@ -41,6 +48,10 @@
     <types>
         <members>AuraPoc_Config.Default</members>
         <name>CustomMetadata</name>
+    </types>
+    <types>
+        <members>dcAgentPreflight</members>
+        <name>LightningComponentBundle</name>
     </types>
     <version>66.0</version>
 </Package>

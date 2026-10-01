@@ -1,0 +1,247 @@
+/* Fill the extension slot (host caps the outer width at the meta "large" preset; this keeps the
+   panel from rendering narrower than the slot allows). */
+:host { display: block; width: 100%; }
+
+/* Panel header — title + one-line description above the tabs, with a link out to the toolkit. */
+.panel-head { display:flex; align-items:flex-start; gap:.75rem; padding:0 .25rem .5rem;
+    border-bottom:1px solid #eef0f2; margin-bottom:.5rem; }
+.panel-head-text { min-width:0; flex:1 1 auto; }
+.panel-title { font-size:.9375rem; font-weight:700; color:#181818; margin:0 0 .125rem; }
+.panel-desc { font-size:.75rem; color:#706e6b; line-height:1.35; margin:0; }
+.panel-about { flex:0 0 auto; font-size:.75rem; color:#0176d3; text-decoration:none;
+    white-space:nowrap; margin-top:.125rem; }
+.panel-about:hover { text-decoration:underline; }
+/* right-side stack of the panel head: About link + Refresh button */
+.panel-head-side { flex:0 0 auto; display:flex; flex-direction:column; align-items:flex-end; gap:.25rem; }
+
+/* Card system (mirrors Email Preflight): one base + a tint per role, so the panel reads as
+   designed rather than assembled. */
+.card { border: 1px solid #dddbda; border-radius: 0.25rem; background: #fff; }
+.card_soft { background: #fafaf9; color: #514f4d; }
+.card_info { border-left: 4px solid #0176d3; background: #f3f9ff; }
+.card_ok { border-left: 4px solid #2e844a; background: #f2fbf4; }
+.card-pad { padding: 0.5rem 0.625rem; }
+
+/* Summary "widgets" on the first tab — number + label tiles, same shape as EP's severity chips. */
+.counts { display: flex; flex-wrap: wrap; gap: 0.375rem; margin-bottom: 0.5rem; }
+.count-chip {
+    flex: 1 1 3.75rem;
+    display: flex; flex-direction: column; align-items: center;
+    padding: 0.5rem 0.25rem;
+    border: 1px solid #dddbda; border-radius: 0.25rem; background: #fff;
+}
+.count-num { font-size: 1.125rem; font-weight: 700; line-height: 1.2; }
+.count-num_accent { color: #0176d3; }
+/* Brand tile — text (not a number), clamped to the chip so a long brand name doesn't blow out
+   the row; centers like the numeric tiles. */
+.count-brand { font-size: .8125rem; font-weight: 700; line-height: 1.2; text-align: center;
+    max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.count-label {
+    font-size: 0.625rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.04em; color: #706e6b; text-align: center; margin-top: 0.125rem;
+}
+
+/* QA/validation rows on the second tab — a status pinned right, an accent rail by pass/fail. */
+.qa-row {
+    display: flex; align-items: center; gap: 0.5rem;
+    border-left: 3px solid #dddbda; background: #fff;
+    padding: 0.4rem 0.5rem 0.4rem 0.5rem; margin-bottom: 0.25rem;
+    font-size: 0.8125rem;
+    /* Never let a long label + nowrap fix-link (e.g. the config record row) push the row wider than
+       the panel and shove the "Open config record ↗" link off-screen. Clip at the row box; the label
+       ellipsizes (below). */
+    overflow: hidden;
+}
+.qa-row_ok { border-left-color: #2e844a; }
+.qa-row_warn { border-left-color: #fe9339; }
+.qa-row_fail { border-left-color: #ba0517; }
+.qa-row_manual { border-left-color: #0176d3; }   /* guidance step the panel can't verify */
+/* Detail can be a long value (instance URL, run-as user email) -- let it shrink and ellipsize so it
+   never forces the row wider than the panel (which pushed the status + fix link off-screen). */
+.qa-detail { color: #706e6b; font-size: 0.75rem; flex: 0 1 auto; min-width: 0;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qa-status { margin-left: auto; flex: 0 0 auto; font-size: 0.75rem; font-weight: 700; }
+.qa-status_ok { color: #2e844a; }
+.qa-status_warn { color: #a86403; }
+.qa-status_fail { color: #ba0517; }
+.qa-status_manual { color: #0176d3; }
+
+.section-title {
+    font-size: 0.75rem; font-weight: 700; text-transform: uppercase;
+    letter-spacing: 0.0625em; color: #5c5c5c; margin: 0.75rem 0 0.375rem;
+}
+code { overflow-wrap: anywhere; }
+
+.setup-banner { display:flex; align-items:center; gap:.75rem; padding:.5rem .75rem;
+    border-radius:.25rem; margin:.25rem 0 .5rem; font-size:.8125rem; }
+.setup-banner_ok   { background:#eafaea; border-left:3px solid #2e844a; color:#194e31; }
+.setup-banner_todo { background:#fef5e7; border-left:3px solid #dd7a01; color:#5c3c00; }
+.setup-remaining { font-weight:700; }
+.link-btn { background:none; border:0; color:#0176d3; cursor:pointer; font-size:.8125rem;
+    padding:0; text-decoration:underline; }
+.qa-step { font-weight:700; opacity:.6; margin-right:.25rem; }
+/* The label takes the free space but MUST be allowed to shrink (min-width:0) and ellipsize, or its
+   intrinsic width plus the nowrap fix-link overflows the row and pushes the link off-screen. */
+.qa-label { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.qa-fix { margin-left:.5rem; flex:0 0 auto; color:#0176d3; text-decoration:none; white-space:nowrap; }
+.qa-fix:hover { text-decoration:underline; }
+
+.test-summary { display:flex; align-items:center; gap:.5rem; padding:.4rem .6rem;
+    border-radius:.25rem; margin:.5rem 0 .25rem; font-size:.8125rem; font-weight:700; }
+.test-summary_ok   { background:#eafaea; border-left:3px solid #2e844a; color:#194e31; }
+.test-summary_fail { background:#fef5e7; border-left:3px solid #dd7a01; color:#5c3c00; }
+.test-ranat { margin-left:auto; font-weight:400; font-size:.75rem; opacity:.7; }
+.ws-row { display:flex; align-items:center; gap:.5rem; padding:.35rem .5rem;
+    border-left:3px solid #dddbda; margin-bottom:.25rem; font-size:.8125rem; }
+.ws-row_pick { border-left-color:#0176d3; background:#f3f9ff; }
+.ws-name { flex:1 1 auto; }
+.ws-badge { font-size:.6875rem; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+    color:#0176d3; }
+
+.asset-row { display:flex; align-items:center; gap:.625rem; padding:.4rem .5rem;
+    border:1px solid #dddbda; border-radius:.25rem; margin-bottom:.375rem; background:#fff; }
+.asset-thumb { width:44px; height:44px; object-fit:contain; border:1px solid #eef0f2;
+    border-radius:.125rem; background:#fafaf9; flex:0 0 auto; }
+.asset-swatch { width:44px; height:44px; flex:0 0 auto; display:flex; align-items:center;
+    justify-content:center; border:1px solid #dddbda; border-radius:.125rem; background:#f3f9ff;
+    color:#0176d3; font-weight:700; font-size:1.125rem; }
+.asset-meta { display:flex; flex-direction:column; min-width:0; }
+.asset-role { font-size:.625rem; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+    color:#706e6b; }
+.asset-name { font-size:.8125rem; font-weight:600; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; }
+.asset-type { font-size:.6875rem; color:#706e6b; }
+
+/* Decision-table preview (PP → Op → decision→variant rows) — mirrors the toolkit's Object
+   Visualizer topology, in the panel's SLDS palette. */
+.pp-node { border:1px solid #dddbda; border-left:3px solid #0176d3; border-radius:.25rem;
+    background:#f3f9ff; padding:.5rem .625rem; margin-bottom:.5rem; }
+.pp-node-head { display:flex; align-items:baseline; gap:.5rem; flex-wrap:wrap; }
+.pp-kind { font-size:.5625rem; font-weight:700; text-transform:uppercase; letter-spacing:.06em;
+    color:#0176d3; background:#e8f3ff; border-radius:.125rem; padding:.05rem .3rem; }
+.pp-name { font-weight:700; font-size:.8125rem; color:#181818; }
+.pp-meta { font-size:.6875rem; color:#706e6b; }
+.pp-ops { margin-left:auto; font-size:.6875rem; color:#706e6b; font-weight:600; }
+/* Status badge — a PP that isn't Active won't fire at send, so Draft/Inactive reads amber and
+   unknown (no org header) reads neutral, against the green of Active. */
+.pp-badge { font-size:.5625rem; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+    border-radius:.125rem; padding:.05rem .35rem; }
+.pp-badge_ok { color:#194e31; background:#eafaea; }
+.pp-badge_warn { color:#8a5a00; background:#fef5e7; }
+.pp-badge_unknown { color:#514f4d; background:#eef1f6; }
+
+.pp-op { margin-top:.4rem; padding-top:.35rem; border-top:1px dashed #d7e6f5; }
+.pp-op:first-of-type { border-top:none; margin-top:.3rem; }
+.pp-op-head { display:flex; align-items:baseline; gap:.4rem; flex-wrap:wrap; margin-bottom:.15rem; }
+.pp-op-tag { font-size:.5625rem; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+    color:#514f4d; background:#eef1f6; border-radius:.125rem; padding:.05rem .3rem; }
+.pp-op-target { font-size:.75rem; font-weight:600; color:#181818; }
+.pp-op-sub { margin-left:auto; font-size:.6875rem; color:#706e6b; }
+.pp-op-empty { font-size:.75rem; color:#706e6b; font-style:italic; margin-top:.3rem; }
+
+/* decision name | → | variant. The rule (field=value) is not carried in the in-frame body — it
+   lives org-side on the PP's decisions — so the panel shows the decision→variant mapping, which is
+   what the body reliably provides. */
+.dc-table { display:grid; grid-template-columns:max-content max-content minmax(0,1fr);
+    column-gap:.5rem; row-gap:.15rem; padding:.15rem .25rem .15rem .75rem; align-items:baseline; }
+.dc-row { display:contents; }
+.dc-dec { font-weight:600; font-size:.75rem; color:#0176d3; }
+.dc-arrow { color:#706e6b; font-size:.75rem; }
+.dc-var { font-size:.75rem; color:#181818; overflow:hidden; text-overflow:ellipsis;
+    white-space:nowrap; }
+
+/* Talk-to-the-agent bridge: current email key + copy buttons, shown above the tabs. */
+.email-bridge { border:1px solid #d8e6f6; background:#f3f9ff; border-radius:.25rem;
+    padding:.5rem .625rem; margin:0 .25rem .625rem; }
+.email-bridge-row { display:flex; align-items:baseline; gap:.5rem; min-width:0; }
+.email-bridge-label { flex:0 0 auto; font-size:.6875rem; font-weight:700; text-transform:uppercase;
+    letter-spacing:.04em; color:#0176d3; }
+.email-bridge-key { flex:1 1 auto; min-width:0; font-family:monospace; font-size:.75rem; color:#181818;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.email-bridge-actions { display:flex; flex-wrap:wrap; gap:.375rem; margin-top:.375rem; }
+.bridge-btn { display:inline-flex; align-items:center; gap:.3rem; font-size:.75rem; line-height:1;
+    padding:.375rem .625rem; border:1px solid #c9c7c5;
+    border-radius:.25rem; background:#fff; color:#514f4d; cursor:pointer; }
+.bridge-btn:hover { background:#f4f6f9; }
+.bridge-btn_primary { border-color:#0176d3; background:#0176d3; color:#fff; }
+.bridge-btn_primary:hover { background:#014486; }
+.bridge-btn[disabled] { opacity:.5; cursor:not-allowed; }
+.bridge-btn[disabled]:hover { background:#fff; }
+/* compact brand logo/header thumbnails below the key (moved up from Tab 1, smaller) */
+.email-bridge-assets { display:flex; flex-wrap:wrap; gap:.5rem; margin-top:.375rem; }
+.bridge-asset { display:flex; flex-direction:column; align-items:center; gap:.125rem; max-width:64px; }
+.bridge-asset-thumb { width:28px; height:28px; object-fit:contain; border:1px solid #eef0f2;
+    border-radius:.25rem; background:#fff; }
+.bridge-asset-swatch { width:28px; height:28px; display:flex; align-items:center; justify-content:center;
+    border-radius:.25rem; background:#eef1f6; color:#514f4d; font-size:.75rem; font-weight:700; }
+.bridge-asset-role { font-size:.5625rem; font-weight:700; text-transform:uppercase; letter-spacing:.03em;
+    color:#706e6b; }
+/* always-present editor Refresh on the key row; highlights (green glow) when an agent update is detected */
+.refresh-btn { flex:0 0 auto; display:inline-flex; align-items:center; gap:.2rem; padding:.2rem .45rem; }
+.refresh-ico { font-size:.8125rem; line-height:1; }
+.refresh-btn_alert { border-color:#2e844a; background:#f2fbf4; color:#194e31; font-weight:700;
+    box-shadow:0 0 0 2px rgba(46,132,74,.25); animation:refreshPulse 1.6s ease-in-out infinite; }
+.refresh-btn_alert:hover { background:#e4f6e9; }
+@keyframes refreshPulse {
+    0%,100% { box-shadow:0 0 0 2px rgba(46,132,74,.20); }
+    50%     { box-shadow:0 0 0 4px rgba(46,132,74,.45); }
+}
+.update-ready-hint { font-size:.6875rem; color:#194e31; font-weight:600; margin:.25rem 0 0; }
+/* inline copy-key icon button next to the key value */
+.key-copy-btn { flex:0 0 auto; border:none; background:transparent; cursor:pointer; padding:0 .25rem;
+    color:#0176d3; font-size:.8125rem; line-height:1; }
+.key-copy-btn:hover { color:#014486; }
+.copy-ico { font-size:.8125rem; line-height:1; }
+.copy-ok { color:#2e844a; font-weight:700; }
+.email-bridge-hint { font-size:.6875rem; color:#706e6b; line-height:1.35; margin:.375rem 0 0; }
+.email-bridge-hint_err { color:#ba0517; }
+
+/* Quick-action prompt buttons — one-click ready prompts (Translate, and later industry/B2B·B2C),
+   set off from the copy buttons above by a labeled row. */
+.quick-actions { display:flex; align-items:center; flex-wrap:wrap; gap:.375rem; margin-top:.5rem;
+    padding-top:.5rem; border-top:1px dashed #d8e6f6; }
+.quick-actions-label { flex:0 0 auto; font-size:.6875rem; font-weight:700; text-transform:uppercase;
+    letter-spacing:.04em; color:#0176d3; margin-right:.125rem; }
+.quick-action-btn { font-size:.75rem; }
+
+/* Slot roles readout (Tab 1): per-block classification logo/image/text/footer. Read-only. */
+.slot-role-row { display:flex; align-items:center; gap:.5rem; padding:.3rem .5rem; font-size:.8125rem;
+    border-bottom:1px solid #f0f0f0; }
+.slot-role-num { font-weight:700; color:#514f4d; min-width:3.25rem; }
+.slot-role-kind { color:#706e6b; min-width:5rem; }
+.sr-role { font-size:.625rem; font-weight:700; text-transform:uppercase; letter-spacing:.04em;
+    border-radius:.125rem; padding:.05rem .35rem; }
+.sr-role_logo   { color:#5c3c00; background:#fef5e7; }   /* brand mark — not content-personalized */
+.sr-role_footer { color:#514f4d; background:#eef1f6; }   /* boilerplate — not content-personalized */
+.sr-role_image  { color:#0b6b5f; background:#e6f6f3; }   /* body/hero image — swap-eligible */
+.sr-role_text   { color:#194e31; background:#eafaea; }   /* body copy — copy-vary eligible */
+.slot-role-note { margin-left:auto; font-size:.6875rem; color:#a86403; font-style:italic; }
+/* "has DC" badge — this slot is ALREADY personalized (an op targets it) → not eligible for a new axis */
+.slot-role-dc { margin-left:auto; font-size:.625rem; font-weight:700; color:#0b5cab; background:#eaf3fb;
+    border-radius:3px; padding:.05rem .3rem; }
+.slot-role-dc + .slot-role-note { margin-left:.4rem; }
+
+/* Plan preview (Feature 3) */
+.card_warn { border-left: 4px solid #a86403; background: #fef5e7; color: #5c3c00; }
+.preview-card { margin-top: .75rem; }
+.preview-head { align-items: center; }
+.preview-title { font-weight: 600; font-size: .8125rem; }
+.preview-toggle { margin-left: auto; }
+.preview-hint { font-size: .75rem; color: #706e6b; margin: .25rem 0 .5rem; }
+.preview-input { display: block; margin-bottom: .375rem; }
+.preview-elig { font-size: .6875rem; color: #194e31; margin: 0 0 .5rem; }
+.preview-run { margin-top: .25rem; }
+.preview-checking { margin-left: .5rem; font-size: .75rem; color: #706e6b; }
+.preview-err { margin-top: .5rem; padding: .375rem .5rem; border-radius: 4px; }
+.preview-label { font-size: .75rem; font-weight: 600; margin: .5rem 0 .125rem; }
+.preview-list { margin: 0 0 .25rem 1rem; padding: 0; font-size: .75rem; }
+.preview-list li { list-style: disc; }
+.preview-warns li { color: #5c3c00; }
+.preview-summary { font-size: .6875rem; color: #706e6b; margin-top: .5rem; font-style: italic; }
+
+/* Collapsible section header (Personalization Points) + slot chip on an Op */
+.section-head { display: flex; align-items: center; gap: .5rem; }
+.section-head .section-title { flex: 1 1 auto; }
+.section-toggle { flex: 0 0 auto; }
+.pp-op-slot { font-size: .625rem; font-weight: 700; color: #194e31; background: #eafaea;
+    border-radius: 3px; padding: .05rem .3rem; }
