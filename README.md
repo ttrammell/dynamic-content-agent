@@ -41,6 +41,8 @@ Before deploying to a brand-new org, open `aiAuthoringBundles/Dynamic_Content_Ag
 
 The agent's Apex actions authenticate back into the org itself using a JWT Bearer flow (certificate-based server-to-server login, not a client secret).
 
+> **Setup path:** `<setup-host>/lightning/setup/ExternalClientAppsManager/home` — ⚠ the External Client App Manager lives on the **`.my.salesforce-setup.com`** host, *not* `.my.salesforce.com` (opening it on the wrong host 404s). See the [Setup-path reference](#setup-path-reference) at the end for how to build the full URL.
+
 1. Setup → Quick Find → **External Client Apps Manager** → open **AuraPoc_JwtApp** → **Edit Settings**
 2. Check **Enable OAuth**
 3. **Callback URL**: any syntactically valid HTTPS URL works — JWT Bearer flow never actually redirects to it. Use `https://<your-domain>.my.salesforce.com/services/oauth2/callback`
@@ -56,12 +58,16 @@ The agent's Apex actions authenticate back into the org itself using a JWT Beare
 
 ### Step 2 — Pre-authorize the run-as user
 
+> **Setup path:** same ECA on the `-setup` host → `AuraPoc_JwtApp` → **Policies → OAuth Policies**. Perm sets live at `/lightning/setup/PermSets/home`.
+
 1. Same app → **Policies** tab → **OAuth Policies** → Permitted Users = **"Admin approved users are pre-authorized"** (not "self-authorize" — that requires a prior interactive approval that will never exist for a server-to-server flow, and the token exchange will fail as unauthorized)
 2. Under **App Policies**, add the run-as user's Profile (e.g. System Administrator, if that's their profile) or a dedicated Permission Set to Selected Profiles/Permission Sets
 3. Confirm that user also has the **Prompt Template User** permission set (`EinsteinGPTPromptTemplateUser`) assigned — separate gate required for Apex/API-invoked LLM generation, not included in System Administrator by default
 4. Save
 
 ### Step 3 — Get the Consumer Key and finish the config record
+
+> **Setup path:** config record at `/lightning/setup/CustomMetadata/home` → **AuraPoc Config** → Manage Records → **Default**.
 
 1. Same app's page → **Manage Consumer Details** → copy the **Consumer Key**
 2. Setup → Custom Metadata Types → **AuraPoc Config** → Manage Records → edit the **Default** record and replace the placeholder values:
@@ -76,6 +82,8 @@ The agent's Apex actions authenticate back into the org itself using a JWT Beare
 
 Building an email with a Personalization Point promotes the JWT bearer token into a real Lightning session via `frontdoor.jsp`, then makes follow-up Apex HTTP callouts to complete that hop. `Auth.JWTBearerTokenExchange` (Steps 1–3's token fetch) is exempt from the outbound-callout allowlist, but these follow-up requests are not — each needs an explicit, active entry in Setup → Security → **Remote Site Settings**, or they fail with `System.CalloutException: Unauthorized endpoint`.
 
+> **Setup path:** `/lightning/setup/SecurityRemoteProxy/home`.
+
 1. Setup → Quick Find → **Remote Site Settings** → New Remote Site
 2. Add an entry pointing at `https://<your-my-domain>.file.force.com`
 3. Add a second entry pointing at `https://<your-my-domain>.lightning.force.com`
@@ -85,6 +93,8 @@ Both hosts are org-specific (your own My Domain, different suffix) — they can'
 
 ### Step 5 — Compile the draft into a live agent
 
+> **Setup path:** `/lightning/setup/EinsteinCopilot/home` → open **Dynamic Content Agent**. (CLI equivalent: `sf agent publish authoring-bundle -n Dynamic_Content_Agent_v3 -o <alias>` then `sf agent activate -n Dynamic_Content_Agent_v3 --version <N> -o <alias>` — publish+activate is CLI-or-UI; the deploy link cannot reach it.)
+
 Setup → Agents (Agent Builder) → open **Dynamic Content Agent** → click **Commit Version**.
 
 **Save ≠ Commit Version — confirmed live.** Clicking Save (or making a trivial edit and saving) keeps the agent in **Draft** state and does *not* produce a queryable `BotDefinition`/`BotVersion`, even though Agent Builder's Preview pane will still happily chat with it off raw draft source — which is exactly what masks this being unfinished. Symptom if you skip this: the plan-generation turn works fine (every Apex action fires and succeeds), but the moment the conversation tries to transition into the build subagent after you approve the plan, it silently goes nowhere — no error, no further Apex call, every single time. Only **Commit Version** creates the real compiled planner/plugin graph that transition needs to land on.
@@ -92,6 +102,8 @@ Setup → Agents (Agent Builder) → open **Dynamic Content Agent** → click **
 ### Step 6 — Grant Agent Access (make it visible to users)
 
 Committing a version makes the agent *live and queryable*, but an internal (Employee) agent is still invisible to users until you grant **Agent Access** — a Profile/Permission Set grant, not a connection (internal agents have none).
+
+> **Setup path:** Permission Set at `/lightning/setup/PermSets/home` → open the set → **App → Agent Access** (or a Profile at `/lightning/setup/EnhancedProfiles/home`).
 
 1. Setup → the target **Profile** or **Permission Set** (the one you pre-authorized in Step 2 is a convenient choice) → **App → Agent Access**
 2. Add **Dynamic Content Agent** (`Dynamic_Content_Agent_v3`)
@@ -106,3 +118,26 @@ sf data query --query "SELECT DeveloperName FROM BotDefinition WHERE DeveloperNa
 ```
 
 Should return one row once Step 5 above is done (not just opened without error — Draft agents open fine too). Then test a real build in Agent Builder's test chat **with a personalized/dynamic element**, not just a static one, to confirm the full JWT + LLM chain and the session-minting callouts (Step 4) actually work together — a static-only build can succeed even with Step 4 missing, since it never touches Personalization Points.
+
+## Setup-path reference
+
+Each step above lists an org-relative **Setup path**. To open it, prefix the path with your org's Setup URL:
+
+```
+https://<my-domain>.my.salesforce-setup.com
+```
+
+(`<my-domain>` is your org's My Domain — the subdomain you log in at. The modern Setup UI lives on the dedicated **`.my.salesforce-setup.com`** host; `.my.salesforce.com` is the app host.)
+
+| Step | Setup path (prefix with the host above) |
+|---|---|
+| 1 — Enable OAuth on the ECA | `/lightning/setup/ExternalClientAppsManager/home` ⚠ `-setup` host |
+| 2 — Pre-authorize run-as user | same ECA → Policies → OAuth Policies; perm sets `/lightning/setup/PermSets/home` |
+| 3 — Consumer Key + config record | `/lightning/setup/CustomMetadata/home` → AuraPoc Config → Default |
+| 4 — Remote Site Settings | `/lightning/setup/SecurityRemoteProxy/home` |
+| 5 — Compile (Commit Version) | `/lightning/setup/EinsteinCopilot/home` |
+| 6 — Grant Agent Access | `/lightning/setup/PermSets/home` (or Profiles `/lightning/setup/EnhancedProfiles/home`) |
+
+**Prerequisite — Marketing CMS workspace** (needed before any build): an Enhanced CMS workspace of type `marketing` must exist, under `/lightning/setup/DigitalExperiencesSetup/home` → CMS Workspaces.
+
+> Inside the org, the companion **"Dynamic Content Agent" panel** (deployed with the package, in the CMS email builder) renders these same paths as live, pre-resolved deep links on its **Setup tab** — it knows your My Domain and the exact record Ids, so prefer clicking there over hand-building a URL.
