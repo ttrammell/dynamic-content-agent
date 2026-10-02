@@ -52,7 +52,9 @@ The agent's Apex actions authenticate back into the org itself using a JWT Beare
    - a Data Cloud scope (`cdp_api` if offered as a general scope; otherwise `cdp_query_api` or `cdp_profile_api`, whichever your org exposes)
    - `Perform requests on your behalf at any time (refresh_token, offline_access)` — **required**, even though this flow never actually returns or uses a refresh token. Omitting it is the single most common reason this setup fails on first test (`invalid_request: refresh_token scope is required...`)
 5. Check **Enable JWT Bearer Flow**
-6. **Certificate**: select the existing **AuraPoc_JwtCert** from the picker (already exists from the deploy — do not upload a new file)
+6. **Certificate**: select **AuraPoc_JwtCert**.
+   - It already exists from the deploy, so try the picker first.
+   - **If the picker doesn't list it (common on a fresh org):** Setup → **Certificate and Key Management** → **AuraPoc_JwtCert** → **Download Certificate** (gives the `.crt`), then back in the ECA upload/select that file here. Confirmed necessary on a fresh-org install (2026-10-02) — the deployed cert isn't always offered in the ECA picker until it's been re-selected this way. Do **not** generate a brand-new self-signed cert (that mints a different key the config record's `CertDevName__c` won't match).
 7. Leave **"Issue JSON Web Token (JWT)-based access tokens for named users"** unchecked — unrelated setting, controls token *format*, not whether JWT Bearer auth works
 8. Save
 
