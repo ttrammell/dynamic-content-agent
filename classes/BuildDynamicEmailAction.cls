@@ -161,6 +161,11 @@ public with sharing class BuildDynamicEmailAction {
     // against a truly runaway request, not a technical necessity -- see scale test results.
     public static final Integer MAX_PPS_PER_EMAIL = 20;
     public static final Integer MAX_DECISIONS_PER_PP = 10;
+    // Minimum DISTINCT catalog images needed to make a visible per-audience image swap. Single source
+    // of truth: ReadDynamicEmailAction / DcPreflightController / ValidateContentPlanAction all key off
+    // this so the plan-time offer, the preflight panel, the pre-approval validation, and the build-time
+    // guard agree on the floor.
+    public static final Integer MIN_IMAGES_FOR_SWAP = 2;
 
     @TestVisible
     static AuraPocTokenSource tokenSource = new AuraPocTokenProvider();
@@ -226,55 +231,27 @@ public with sharing class BuildDynamicEmailAction {
     // marketing toolkit's battle-tested {!$Expression.*} spec. The LLM never constructs these
     // -- it only ever writes a friendly {{FirstName}} placeholder in element text; this table
     // deterministically expands that into the exact expressionGroups chain Salesforce expects.
-    private static Map<String, Object> exprRuleGroup(String name, String resource, String orderBy) {
-        return new Map<String, Object>{
-            'expressionRule' => new Map<String, Object>{
-                'criteriaType' => 'AnyCriterionMatches', 'description' => '',
-                'expressionCriteria' => new List<Object>(), 'name' => name + '_rule'
-            },
-            'expressionSort' => new Map<String, Object>{ 'orderBy' => orderBy, 'sortOrder' => 'DESC' },
-            'name' => name,
-            'resource' => resource
-        };
-    }
-
-    private static Map<String, Object> exprHopGroup(String name, String resource) {
-        return new Map<String, Object>{ 'name' => name, 'resource' => resource };
-    }
-
-    private static Map<String, Object> exprLeafGroup(String name, String resource) {
-        return new Map<String, Object>{ 'name' => name, 'resource' => resource, 'selectionIndex' => 0.0 };
-    }
-
-    private static List<Object> expressionGroupsFor(String fieldName) {
-        Map<String, Object> group0 = exprRuleGroup('group0', '{!$dataGraph.IndividualIdentityLink__dlm}', 'SourceRecordId__c');
-        Map<String, Object> group1 = exprHopGroup('group1', '{!group0.ssot__Individual__dlm}');
-
-        if (fieldName == 'FirstName') {
-            return new List<Object>{ group0, group1, exprLeafGroup('group2', '{!group1.ssot__FirstName__c}') };
+    // Build the multiLevelExpression entry for a friendly merge field ({{FirstName}} etc.), deriving
+    // the expressionGroups chain from the LIVE graph topology (not a hardcoded chain). Returns null
+    // when the field can't be resolved against this graph (no topology, unknown friendly name, or the
+    // field is absent) so the caller degrades the placeholder to its default text. Group/path builders
+    // live in DataGraphTopology, shared with the criteria-path derivation.
+    private static Map<String, Object> mergeExpressionEntry(String friendlyName, String defaultText, DataGraphTopology topo) {
+        if (topo == null) { return null; }
+        String fieldApi = FRIENDLY_FIELD_API.get(friendlyName);
+        if (String.isBlank(fieldApi)) { return null; }
+        String dmoHint = FRIENDLY_FIELD_DMO.get(friendlyName);  // null when unambiguous
+        List<Object> groups;
+        try {
+            groups = topo.expressionGroupsForField(fieldApi, dmoHint);
+        } catch (DataGraphTopology.TopologyException e) {
+            return null;  // field not in this graph -> degrade the (cosmetic) placeholder to default text
         }
-        if (fieldName == 'LastName') {
-            return new List<Object>{ group0, group1, exprLeafGroup('group2', '{!group1.ssot__LastName__c}') };
-        }
-        if (fieldName == 'AccountName') {
-            Map<String, Object> group2 = exprRuleGroup('group2', '{!group1.ssot__Account__dlm}', 'ssot__Id__c');
-            return new List<Object>{ group0, group1, group2, exprLeafGroup('group3', '{!group2.ssot__Name__c}') };
-        }
-        if (fieldName == 'Persona') {
-            Map<String, Object> group2 = exprRuleGroup('group2', '{!group1.ssot__ContactPointEmail__dlm}', 'ssot__Id__c');
-            Map<String, Object> group3 = exprRuleGroup('group3', '{!group2.ssot__EmailEngagementScore__dlm}', 'ssot__Id__c');
-            return new List<Object>{ group0, group1, group2, group3, exprLeafGroup('group4', '{!group3.ssot__EmailEngagementPersona__c}') };
-        }
-        throw new ElementException('Unsupported merge field "' + fieldName
-            + '" -- supported: FirstName, LastName, AccountName, Persona.');
-    }
-
-    private static Map<String, Object> multiLevelExpressionEntry(String fieldName, String defaultText) {
         Map<String, Object> entry = new Map<String, Object>{
             'definition' => 'sfdc_cms__multiLevelExpression',
-            'label' => fieldName,
-            'sfdcExpressionKey' => fieldName,
-            'attributes' => new Map<String, Object>{ 'expressionGroups' => expressionGroupsFor(fieldName) }
+            'label' => friendlyName,
+            'sfdcExpressionKey' => friendlyName,
+            'attributes' => new Map<String, Object>{ 'expressionGroups' => groups }
         };
         if (String.isNotBlank(defaultText)) {
             entry.put('default', defaultText);
@@ -429,12 +406,36 @@ public with sharing class BuildDynamicEmailAction {
         return base + ' - ' + valStr;
     }
 
+    // Back-compat entry (ValidateContentPlanAction dry-runs this with no graph fetch): keeps the
+    // legacy hardcoded SCOPE/alias behavior.
     public static Map<String, Object> buildDecisionCriteria(Map<String, Object> spec) {
+        return buildDecisionCriteria(spec, null);
+    }
+
+    // Graph-aware entry. When `topo` is non-null, the object + relationship path are DERIVED from the
+    // live graph's real shape (so a field on the graph root => bare comparison, a field on a related
+    // DMO => the correct NumberAggregation path), instead of the hardcoded SCOPE_TO_PATH alias. This
+    // is what makes PP building work on any graph topology, not just the SIC2025 reference shape.
+    public static Map<String, Object> buildDecisionCriteria(Map<String, Object> spec, DataGraphTopology topo) {
         String fieldApiName = String.valueOf(spec.get('criteriaFieldApiName'));
-        String objectApiName = String.isNotBlank(String.valueOf(spec.get('criteriaObjectApiName')))
-            ? String.valueOf(spec.get('criteriaObjectApiName')) : 'UnifiedIndividual__dlm';
-        Boolean isRoot = objectApiName == 'UnifiedIndividual__dlm';
-        List<Object> path = isRoot ? new List<Object>() : resolvePathAlias(String.valueOf(spec.get('criteriaPath')));
+        String objectApiName;
+        Boolean isRoot;
+        List<Object> path;
+        if (topo != null) {
+            // Resolve the field's REAL owning DMO from the graph. Honor an explicit
+            // criteriaObjectApiName hint from the plan when present (disambiguates a field that
+            // lives on more than one DMO, e.g. ssot__Name__c on Account vs Campaign).
+            String hintDmo = String.isNotBlank(String.valueOf(spec.get('criteriaObjectApiName')))
+                ? String.valueOf(spec.get('criteriaObjectApiName')) : null;
+            objectApiName = topo.dmoForField(fieldApiName, hintDmo);   // throws loud if field absent
+            isRoot = topo.fieldIsOnRoot(fieldApiName, hintDmo);
+            path = isRoot ? new List<Object>() : topo.criteriaPathForField(fieldApiName, hintDmo);
+        } else {
+            objectApiName = String.isNotBlank(String.valueOf(spec.get('criteriaObjectApiName')))
+                ? String.valueOf(spec.get('criteriaObjectApiName')) : 'UnifiedIndividual__dlm';
+            isRoot = objectApiName == 'UnifiedIndividual__dlm';
+            path = isRoot ? new List<Object>() : resolvePathAlias(String.valueOf(spec.get('criteriaPath')));
+        }
 
         String criteriaType = String.isNotBlank(String.valueOf(spec.get('criteriaType')))
             ? String.valueOf(spec.get('criteriaType')) : 'has_value';
@@ -544,19 +545,34 @@ public with sharing class BuildDynamicEmailAction {
         'FirstName', 'LastName', 'AccountName', 'Persona'
     };
 
-    private static void substituteMergePlaceholders(Map<String, Object> el, Map<String, Object> expressionsByKey) {
+    // Friendly placeholder -> {real field api name, owning-DMO hint}. The DMO hint disambiguates a
+    // field api name that lives on more than one DMO in a graph (e.g. ssot__Name__c on Account vs
+    // Campaign); the topology derivation uses it to pick the right occurrence. The actual hop chain
+    // is then DERIVED from the live graph, so these entries carry no hardcoded topology.
+    private static final Map<String, String> FRIENDLY_FIELD_API = new Map<String, String>{
+        'FirstName'   => 'ssot__FirstName__c',
+        'LastName'    => 'ssot__LastName__c',
+        'AccountName' => 'ssot__Name__c',
+        'Persona'     => 'ssot__EmailEngagementPersona__c'
+    };
+    private static final Map<String, String> FRIENDLY_FIELD_DMO = new Map<String, String>{
+        'AccountName' => 'ssot__Account__dlm',
+        'Persona'     => 'ssot__EmailEngagementScore__dlm'
+    };
+
+    private static void substituteMergePlaceholders(Map<String, Object> el, Map<String, Object> expressionsByKey, DataGraphTopology topo) {
         Object raw = el.get('text');
         if (!(raw instanceof String)) {
             return;
         }
-        el.put('text', substituteMergePlaceholdersInText((String) raw, expressionsByKey));
+        el.put('text', substituteMergePlaceholdersInText((String) raw, expressionsByKey, topo));
     }
 
     // Also used on decision/variant textByDecision values -- confirmed live that a placeholder
     // in a DC variant's text passed through unsubstituted while the main body correctly
     // resolved it, because only the main elementsJson loop called this. Same substitution logic
     // has to apply everywhere user-facing text can appear.
-    private static String substituteMergePlaceholdersInText(String text, Map<String, Object> expressionsByKey) {
+    private static String substituteMergePlaceholdersInText(String text, Map<String, Object> expressionsByKey, DataGraphTopology topo) {
         if (String.isBlank(text) || !text.contains('{{')) {
             return text;
         }
@@ -566,10 +582,16 @@ public with sharing class BuildDynamicEmailAction {
         while (m.find()) {
             String fieldName = m.group(1);
             String defaultText = m.group(2);
-            if (SUPPORTED_MERGE_FIELDS.contains(fieldName)) {
+            // Resolvable only if it's a known friendly field AND the live graph actually carries it.
+            // Deriving the expression chain from the graph can throw (field absent) -- for a merge
+            // placeholder that's a DEGRADE to default text, not a hard failure (the placeholder is
+            // cosmetic; a decision field absent is handled loud in buildDecisionCriteria instead).
+            Map<String, Object> expr = SUPPORTED_MERGE_FIELDS.contains(fieldName)
+                ? mergeExpressionEntry(fieldName, defaultText, topo) : null;
+            if (expr != null) {
                 // A real, resolvable merge field -> wire it as an $Expression.
                 if (!expressionsByKey.containsKey(fieldName)) {
-                    expressionsByKey.put(fieldName, multiLevelExpressionEntry(fieldName, defaultText));
+                    expressionsByKey.put(fieldName, expr);
                 }
                 result += text.substring(lastEnd, m.start()) + '{!$Expression.' + fieldName + '}';
             } else {
@@ -979,24 +1001,15 @@ public with sharing class BuildDynamicEmailAction {
         }
     }
 
-    // Ordered, DISTINCT list of image contentKeys from the catalog, preserving catalog order. Used by
-    // the deterministic image auto-assign fallback so each personalized decision gets a different real
-    // image even when the plan named no asset. Order is stable within a run (catalog is fetched once).
+    // Ordered, DISTINCT list of SWAP-ELIGIBLE image contentKeys from the catalog, preserving catalog
+    // order. Used by the deterministic image auto-assign fallback so each personalized decision gets a
+    // different real image even when the plan named no asset. Delegates to GetAssetCatalogAction so the
+    // auto-assign pool, the >=2-image offer floor (ReadDynamicEmailAction), and the plan-time
+    // sufficiency check (ValidateContentPlanAction) all count the SAME set -- and so logos/placeholders
+    // (which carry swapEligible=false) are never round-robined in as a per-audience hero. (A plan that
+    // names such an asset by exact name still resolves it via buildAssetNameMap, which runs first.)
     private static List<String> orderedCatalogKeys(String assetsJson) {
-        List<String> out = new List<String>();
-        Set<String> seen = new Set<String>();
-        if (String.isBlank(assetsJson)) { return out; }
-        Object parsed;
-        try { parsed = JSON.deserializeUntyped(AuraPocJson.stripFence(assetsJson)); }
-        catch (Exception e) { return out; }
-        if (!(parsed instanceof List<Object>)) { return out; }
-        for (Object o : (List<Object>) parsed) {
-            if (!(o instanceof Map<String, Object>)) { continue; }
-            String ck = ((Map<String, Object>) o).get('contentKey') == null ? ''
-                : String.valueOf(((Map<String, Object>) o).get('contentKey'));
-            if (String.isNotBlank(ck) && !seen.contains(ck)) { seen.add(ck); out.add(ck); }
-        }
-        return out;
+        return GetAssetCatalogAction.swapEligibleKeys(assetsJson);
     }
 
     // Resolve image-DC VARIANT keys the same way base image elements are resolved: each image
@@ -1153,6 +1166,19 @@ public with sharing class BuildDynamicEmailAction {
                     graphName = String.isNotBlank(req.profileDataGraphName) ? req.profileDataGraphName : 'Real_Time_Data_Graph';
                 }
 
+                // Fetch the resolved graph's RAW topology once, so PersonalizationPoint hop chains
+                // (merge-field display expressions AND decision-criteria relationship paths) are
+                // DERIVED from this org's actual graph shape instead of a hardcoded SIC2025 chain.
+                // Fail-soft to null (mirrors the resolve guard above): a plain, unpersonalized email
+                // must still build. When topo is null the derivation falls back to the legacy
+                // hardcoded behavior (back-compat), so nothing regresses on the reference graph.
+                DataGraphTopology topo = null;
+                try {
+                    topo = DataGraphTopology.parse(DataGraphDetailsAction.fetchGraphBody(accessToken, graphName));
+                } catch (Exception topoEx) {
+                    topo = null;
+                }
+
                 // --- Step 1: build and create the base email ---
                 if (req.subjectLine != null && req.subjectLine.contains('{{')) {
                     throw new ElementException('Merge field placeholders are not supported in the subject line -- it renders outside the data-graph context.');
@@ -1230,7 +1256,7 @@ public with sharing class BuildDynamicEmailAction {
 
                 for (Object elObj : elements) {
                     Map<String, Object> el = (Map<String, Object>) elObj;
-                    substituteMergePlaceholders(el, expressionsByKey);
+                    substituteMergePlaceholders(el, expressionsByKey, topo);
 
                     // The drafted plan can't know which contentKey the banner will end up
                     // using -- confirmed live: a found brand's header image got drafted as a
@@ -1450,7 +1476,7 @@ public with sharing class BuildDynamicEmailAction {
 
                 // --- Step 2: personalize, in the same call. Any failure here rolls back Step 1. ---
                 try {
-                    wirePersonalizations(ppSpecs, accessToken, managedContentId, fetchedContentBody, managedContentVariantId, blockIds, dataSpace, graphName, res);
+                    wirePersonalizations(ppSpecs, accessToken, managedContentId, fetchedContentBody, managedContentVariantId, blockIds, dataSpace, graphName, topo, res);
                 } catch (Exception wireEx) {
                     Boolean rolledBack = deleteContent(managedContentVariantId, accessToken);
                     res.success = false;
@@ -1476,7 +1502,7 @@ public with sharing class BuildDynamicEmailAction {
     // imageFitConfig, not a "text" attribute, or the variant PUT succeeds but preview breaks.
     // For an image target, textByDecision's value must be an object {contentKey, altText,
     // widthPercent} instead of a plain string.
-    private static Map<String, Object> variantAttributesFor(String blockDefinition, Object decisionValue, Map<String, Object> expressionsByKey) {
+    private static Map<String, Object> variantAttributesFor(String blockDefinition, Object decisionValue, Map<String, Object> expressionsByKey, DataGraphTopology topo) {
         if (blockDefinition == 'lightning/image') {
             if (!(decisionValue instanceof Map<String, Object>)) {
                 throw new WireException('Target block is lightning/image, so its textByDecision value must be '
@@ -1490,7 +1516,7 @@ public with sharing class BuildDynamicEmailAction {
             return imageAttributes(contentKey, sanitizeText(String.valueOf(imageSpec.get('altText'))),
                 asDecimal(imageSpec.get('widthPercent'), 100.0), paddingMap(8.0, 16.0, 24.0, 24.0));
         }
-        String text = substituteMergePlaceholdersInText(String.valueOf(decisionValue), expressionsByKey);
+        String text = substituteMergePlaceholdersInText(String.valueOf(decisionValue), expressionsByKey, topo);
         return new Map<String, Object>{ 'text' => sanitizeText(text) };
     }
 
@@ -1500,7 +1526,7 @@ public with sharing class BuildDynamicEmailAction {
     // targetId, own personalizationPoint.name), but every PP's variants share ONE
     // sfdc_cms:variants array. The Aura session is minted once and reused across all PP creations.
     private static void wirePersonalizations(List<Object> ppSpecs, String accessToken, String managedContentId, Map<String, Object> contentBody,
-            String variantRecordId, Map<String, Object> blockIds, String dataSpace, String graphName, Result res) {
+            String variantRecordId, Map<String, Object> blockIds, String dataSpace, String graphName, DataGraphTopology topo, Result res) {
 
         // Seed from whatever the main body already found (keyed by sfdcExpressionKey) so a
         // placeholder used in BOTH main body and variant text resolves to the same expression
@@ -1535,7 +1561,7 @@ public with sharing class BuildDynamicEmailAction {
         // Wrap the whole build+wire loop so any failure cleans up every PP created so far.
         try {
             wirePersonalizationsInner(ppSpecs, sess, auraContextJson, expressionsByKey, blockIds,
-                dataSpace, graphName, managedContentId, allOperations, allVariants, allVariantIdEntries, createdPpNames);
+                dataSpace, graphName, managedContentId, allOperations, allVariants, allVariantIdEntries, createdPpNames, topo);
 
             contentBody.put('lightning:dataProviders', new List<Object>{ dataGraphDataProvider(graphName, dataSpace) });
             contentBody.put('sfdc_cms:operations', allOperations);
@@ -1555,6 +1581,26 @@ public with sharing class BuildDynamicEmailAction {
                 throw new WireException('Variant PUT failed: HTTP ' + putRes.getStatusCode() + ': ' + putRes.getBody());
             }
         } catch (Exception e) {
+            // ORDER MATTERS (proven live on BloombergDemo2026, 2026-10-02): a PersonalizationPoint
+            // cannot be deleted while a ManagedContentResource still references it ("Could not delete
+            // the record. Remove these dependencies: [ManagedContentResource]."). If the operations
+            // PUT above (partially) bound the PP to this variant, deletePersonalizationPoint fails and
+            // the PP is stranded as an orphan (SourceRecordId=null) forever. So FIRST release the
+            // binding by PUTting the content body with EMPTY operations/variants, THEN delete the PPs.
+            // Best-effort: a failure here must not mask the original error.
+            try {
+                Map<String, Object> releaseBody = contentBody.clone();
+                releaseBody.put('sfdc_cms:operations', new List<Object>());
+                releaseBody.put('sfdc_cms:variants', new List<Object>());
+                HttpRequest relReq = new HttpRequest();
+                relReq.setMethod('PUT');
+                relReq.setEndpoint(AuraPocTokenProvider.instanceUrl() + '/services/data/v66.0/connect/cms/contents/variants/' + variantRecordId);
+                relReq.setHeader('Content-Type', 'application/json');
+                relReq.setHeader('Authorization', 'Bearer ' + accessToken);
+                relReq.setBody(JSON.serialize(new Map<String, Object>{ 'contentBody' => releaseBody }));
+                relReq.setTimeout(30000);
+                new Http().send(relReq);
+            } catch (Exception ignored) { /* best-effort release; proceed to PP delete regardless */ }
             for (String ppNameToClean : createdPpNames) {
                 deletePersonalizationPointBestEffort(sess, auraContextJson, ppNameToClean);
             }
@@ -1591,7 +1637,7 @@ public with sharing class BuildDynamicEmailAction {
     // duplicating the loop body.
     private static void wirePersonalizationsInner(List<Object> ppSpecs, AuraSessionMinter.Session sess, String auraContextJson,
             Map<String, Object> expressionsByKey, Map<String, Object> blockIds, String dataSpace, String graphName, String managedContentId,
-            List<Object> allOperations, List<Object> allVariants, List<Object> allVariantIdEntries, List<String> createdPpNames) {
+            List<Object> allOperations, List<Object> allVariants, List<Object> allVariantIdEntries, List<String> createdPpNames, DataGraphTopology topo) {
         for (Object ppSpecObj : ppSpecs) {
             Map<String, Object> ppSpec = (Map<String, Object>) ppSpecObj;
             String rawPpName = String.valueOf(ppSpec.get('ppName'));
@@ -1620,7 +1666,7 @@ public with sharing class BuildDynamicEmailAction {
                 String safeName = sanitizeDeveloperName(rawName);
                 safeDecisionNameByRaw.put(rawName, safeName);
 
-                Map<String, Object> criteria = buildDecisionCriteria(spec);
+                Map<String, Object> criteria = buildDecisionCriteria(spec, topo);
                 // Display label: append the decision's actual VALUE when the plan named every
                 // decision on an axis the same (e.g. all "Recipient industry") -- the small planner
                 // model sometimes collapses per-value names. Deterministic, so the rule reads
@@ -1720,7 +1766,7 @@ public with sharing class BuildDynamicEmailAction {
                             'sfdc_cms:block' => new Map<String, Object>{
                                 'children' => new List<Object>{
                                     new Map<String, Object>{
-                                        'attributes' => variantAttributesFor(blockDefinition, textByDecision.get(rawDecisionName), expressionsByKey),
+                                        'attributes' => variantAttributesFor(blockDefinition, textByDecision.get(rawDecisionName), expressionsByKey, topo),
                                         'id' => targetBlockId,
                                         'definition' => blockDefinition,
                                         'type' => 'block'
@@ -1878,7 +1924,10 @@ public with sharing class BuildDynamicEmailAction {
     // Test/diagnostic hook for the merge-placeholder substitution: converts supported {{Field}} to
     // {!$Expression.Field} and degrades unsupported fields to their default text (no throw).
     public static String sharedSubstituteMergePlaceholders(String text) {
-        return substituteMergePlaceholdersInText(text, new Map<String, Object>());
+        return substituteMergePlaceholdersInText(text, new Map<String, Object>(), null);
+    }
+    public static String sharedSubstituteMergePlaceholders(String text, DataGraphTopology topo) {
+        return substituteMergePlaceholdersInText(text, new Map<String, Object>(), topo);
     }
     // Direct link to the built/updated email RECORD -- opens the specific ManagedContent, not the
     // workspace list. managedContentId is the 20Y... record id the create/GET returns. Uses the
@@ -1905,7 +1954,24 @@ public with sharing class BuildDynamicEmailAction {
             String auraContextJson, Map<String, Object> expressionsByKey, Map<String, Object> blockIds,
             String dataSpace, String graphName, String managedContentId, List<Object> allOperations,
             List<Object> allVariants, List<Object> allVariantIdEntries, List<String> createdPpNames) {
+        sharedWirePersonalizationsInner(ppSpecs, sess, auraContextJson, expressionsByKey, blockIds, dataSpace,
+            graphName, managedContentId, allOperations, allVariants, allVariantIdEntries, createdPpNames, null);
+    }
+    // Graph-aware overload: UpdateDynamicEmailAction passes a parsed topology so an UPDATE build also
+    // derives PP hops from the live graph (null = legacy hardcoded behavior, back-compat).
+    public static void sharedWirePersonalizationsInner(List<Object> ppSpecs, AuraSessionMinter.Session sess,
+            String auraContextJson, Map<String, Object> expressionsByKey, Map<String, Object> blockIds,
+            String dataSpace, String graphName, String managedContentId, List<Object> allOperations,
+            List<Object> allVariants, List<Object> allVariantIdEntries, List<String> createdPpNames, DataGraphTopology topo) {
         wirePersonalizationsInner(ppSpecs, sess, auraContextJson, expressionsByKey, blockIds, dataSpace,
-            graphName, managedContentId, allOperations, allVariants, allVariantIdEntries, createdPpNames);
+            graphName, managedContentId, allOperations, allVariants, allVariantIdEntries, createdPpNames, topo);
+    }
+    // Lets UpdateDynamicEmailAction build the same topology from a fetched graph body.
+    public static DataGraphTopology sharedParseTopology(String accessToken, String graphName) {
+        try {
+            return DataGraphTopology.parse(DataGraphDetailsAction.fetchGraphBody(accessToken, graphName));
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

@@ -137,6 +137,24 @@ public with sharing class AssembleContentPlanAction {
         return out;
     }
 
+    // Field-api-names present on ANY DMO in the graph (DMO-agnostic). The drop-and-keep check uses this
+    // so a field is kept when it exists in the graph REGARDLESS of which DMO the hardcoded SCOPE_TO_OBJECT
+    // map guesses -- Build now derives the real owning DMO from the live graph topology, so Assemble must
+    // not false-drop a field that exists but under a different DMO than the scope map assumes (the
+    // graph-shape drift). A field absent from EVERY DMO (e.g. Persona on a graph with no engagement branch)
+    // is still correctly dropped.
+    private static Set<String> buildAvailableFieldApiNameSet(String availableFieldsJson) {
+        Set<String> out = new Set<String>();
+        if (String.isBlank(availableFieldsJson)) { return out; }
+        try {
+            for (Object o : (List<Object>) JSON.deserializeUntyped(availableFieldsJson)) {
+                Map<String, Object> f = (Map<String, Object>) o;
+                out.add(String.valueOf(f.get('fieldApiName')));
+            }
+        } catch (Exception ignore) { /* malformed catalog -> unverifiable, not fatal */ }
+        return out;
+    }
+
     // Map fieldApiName -> dataType (Text / Number / DateTime / ...) from the graph catalog, so a
     // decision can carry its field's type and the criteria builder can emit a Number/Date predicate
     // instead of always Text (the DC platform rejects a Text predicate on a numeric/date field:
@@ -551,6 +569,16 @@ public with sharing class AssembleContentPlanAction {
                                 + 'and was dropped (built non-personalized): ' + describeAxes(personalizations) + '.');
                             personalizations = new List<Object>();
                         } else {
+                            // DMO-agnostic existence check: keep a personalization if its field exists on
+                            // the hardcoded SCOPE_TO_OBJECT DMO (the historical check) OR on ANY DMO in the
+                            // graph. Build derives the real owning DMO from the live topology, so a field
+                            // that exists under a DIFFERENT DMO than the scope map guesses must NOT be
+                            // false-dropped here (graph-shape drift). Only a field absent from the WHOLE
+                            // graph is dropped. (Example: on Bloomberg ssot__FirstName__c is on the root
+                            // UnifiedIndividual__dlm, not the scope-mapped ssot__Individual__dlm for the
+                            // RecipientProfile scope -- the field-only set keeps it; Persona, absent from
+                            // every DMO, is still dropped.)
+                            Set<String> availableFieldApis = buildAvailableFieldApiNameSet(req.availableFieldsJson);
                             List<Object> kept = new List<Object>();
                             List<String> dropped = new List<String>();
                             for (Object pObj : personalizations) {
@@ -558,7 +586,9 @@ public with sharing class AssembleContentPlanAction {
                                 String scope = String.valueOf(p.get('scope'));
                                 String fieldApiName = String.valueOf(p.get('fieldApiName'));
                                 String objectApiName = SCOPE_TO_OBJECT.get(scope);
-                                if (objectApiName != null && available.contains(objectApiName + '|' + fieldApiName)) {
+                                Boolean onScopeDmo = objectApiName != null && available.contains(objectApiName + '|' + fieldApiName);
+                                Boolean onAnyDmo = availableFieldApis.contains(fieldApiName);
+                                if (onScopeDmo || onAnyDmo) {
                                     kept.add(pObj);
                                 } else {
                                     dropped.add((p.get('label') != null ? String.valueOf(p.get('label')) : fieldApiName)

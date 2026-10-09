@@ -85,7 +85,44 @@ public with sharing class ValidateContentPlanAction {
         return out;
     }
 
-    @InvocableMethod(label='Validate Content Plan' description='Checks a drafted content plan (elementsJson/personalizationsJson) for structural problems -- unfilled elements (empty text/url/contentKey), missing textByDecision entries, unknown element keys, invalid decision criteria, too many PersonalizationPoints or decisions -- before asking the user to approve it. Makes no changes and creates nothing.')
+    // Field-api-names present on ANY DMO in the graph (DMO-agnostic). The decision field-existence
+    // check uses this so a field is accepted when it exists in the graph regardless of which DMO the
+    // planner stamped on criteriaObjectApiName -- Build derives the real owning DMO from the live
+    // topology, so Validate must not false-reject a field that exists but under a different DMO (the
+    // graph-shape drift; mirrors AssembleContentPlanAction.buildAvailableFieldApiNameSet).
+    private static Set<String> buildAvailableFieldApiNameSet(String availableFieldsJson) {
+        Set<String> out = new Set<String>();
+        if (String.isBlank(availableFieldsJson)) { return out; }
+        try {
+            for (Object o : (List<Object>) JSON.deserializeUntyped(availableFieldsJson)) {
+                Map<String, Object> f = (Map<String, Object>) o;
+                out.add(String.valueOf(f.get('fieldApiName')));
+            }
+        } catch (Exception ignore) { /* malformed catalog -> unverifiable, not fatal */ }
+        return out;
+    }
+
+    // Count DISTINCT SWAP-ELIGIBLE catalog images (brand-less stock library) for the image-swap
+    // sufficiency check. Returns -1 on ANY failure so validation treats it as UNVERIFIABLE and skips
+    // the check (never blocks a plan because the catalog call errored). Counts via
+    // GetAssetCatalogAction.swapEligibleKeys -- the SAME shared pool Build's auto-assign draws from and
+    // ReadDynamicEmailAction's offer floor counts -- so plan validation, the offer floor, and the build
+    // can never disagree on what counts (logos/placeholders excluded from all three). This is the ONE
+    // callout ValidateContentPlanAction makes, and only when an image personalization is present (see
+    // the caller's imageSwapDecisionCount > 0 guard) -- off the common hot path.
+    private static Integer countCatalogImages() {
+        try {
+            GetAssetCatalogAction.Request gc = new GetAssetCatalogAction.Request();
+            gc.brandName = '';
+            gc.includeStock = true;
+            String aj = GetAssetCatalogAction.getAssetCatalog(new List<GetAssetCatalogAction.Request>{ gc })[0].assetsJson;
+            return GetAssetCatalogAction.swapEligibleKeys(aj).size();
+        } catch (Exception e) {
+            return -1;   // unverifiable -> caller skips the check rather than false-flagging a valid plan
+        }
+    }
+
+    @InvocableMethod(label='Validate Content Plan' description='Checks a drafted content plan (elementsJson/personalizationsJson) for structural problems -- unfilled elements (empty text/url/contentKey), missing textByDecision entries, unknown element keys, invalid decision criteria, too many PersonalizationPoints or decisions, and image personalizations the org has too few images to support -- before asking the user to approve it. Makes no changes and creates nothing.')
     public static List<Result> validateContentPlan(List<Request> requests) {
         List<Result> results = new List<Result>();
         for (Request req : requests) {
@@ -177,6 +214,9 @@ public with sharing class ValidateContentPlanAction {
                     // (object, field) in the resolved graph. Backstops AssembleContentPlanAction's
                     // own drop step so an unverified field can never reach build.
                     Set<String> availableFields = buildAvailableFieldSet(req.availableFieldsJson);
+                    // Field-api-names present on ANY DMO (DMO-agnostic), so the existence check below
+                    // doesn't false-reject a field whose real DMO differs from the planner's guess.
+                    Set<String> availableFieldApis = buildAvailableFieldApiNameSet(req.availableFieldsJson);
 
                     if (ppSpecs.size() > BuildDynamicEmailAction.MAX_PPS_PER_EMAIL) {
                         issues.add('Plan has ' + ppSpecs.size() + ' PersonalizationPoints, but at most '
@@ -191,6 +231,14 @@ public with sharing class ValidateContentPlanAction {
                     // this before approval instead of after two orphaned PersonalizationPoint
                     // records are already sitting in the org.
                     Map<String, List<String>> ppLabelsByElementKey = new Map<String, List<String>>();
+
+                    // Image-swap sufficiency: an image personalization auto-assigns a DISTINCT catalog
+                    // image per decision, so it needs >= MIN_IMAGES_FOR_SWAP distinct images in the org.
+                    // Count the auto-assign/asset-ref image decisions here, then verify the catalog ONCE
+                    // after the loop -- catching an impossible image swap at PLAN time (before the user
+                    // approves) instead of only at build time (the existing backstop in Build).
+                    Integer imageSwapDecisionCount = 0;
+                    Set<String> imagePersonalizationLabels = new Set<String>();
 
                     for (Object ppSpecObj : ppSpecs) {
                         Map<String, Object> ppSpec = (Map<String, Object>) ppSpecObj;
@@ -223,10 +271,19 @@ public with sharing class ValidateContentPlanAction {
                             if (!availableFields.isEmpty()) {
                                 String objectApiName = String.valueOf(spec.get('criteriaObjectApiName'));
                                 String fieldApiName = String.valueOf(spec.get('criteriaFieldApiName'));
-                                if (!availableFields.contains(objectApiName + '|' + fieldApiName)) {
+                                // DMO-AGNOSTIC existence check (must match AssembleContentPlanAction's drop
+                                // logic, else Validate false-rejects what Assemble correctly kept). Build
+                                // derives the real owning DMO from the live graph topology, so the planner's
+                                // criteriaObjectApiName GUESS can be wrong (e.g. ssot__EmailAddress__c stamped
+                                // on UnifiedIndividual__dlm when it actually lives on ssot__ContactPointEmail__dlm).
+                                // Accept the field if it exists on the stamped DMO OR on ANY DMO in the graph;
+                                // only a field absent from EVERY DMO is a real error.
+                                Boolean onStampedDmo = availableFields.contains(objectApiName + '|' + fieldApiName);
+                                Boolean onAnyDmo = availableFieldApis.contains(fieldApiName);
+                                if (!onStampedDmo && !onAnyDmo) {
                                     issues.add('PersonalizationPoint "' + ppLabel + '" decision "' + spec.get('name')
-                                        + '" references field "' + fieldApiName + '" on "' + objectApiName
-                                        + '", which is not in the resolved data graph'
+                                        + '" references field "' + fieldApiName
+                                        + '", which is not present on any object in the resolved data graph'
                                         + (String.isNotBlank(req.resolvedGraphApiName) ? ' "' + req.resolvedGraphApiName + '"' : '')
                                         + '. Only fields present in the graph can drive personalization.');
                                 }
@@ -279,6 +336,17 @@ public with sharing class ValidateContentPlanAction {
                                         issues.add('PersonalizationPoint "' + ppLabel + '" target "' + elementKey
                                             + '" (image) has an invalid variant for decision "' + decisionName
                                             + '" -- an image variant must be an object (assetName/contentKey or empty for auto-assign), not text.');
+                                    } else {
+                                        // Count this image-swap decision for the catalog-sufficiency check
+                                        // below -- a swap by audience needs >= MIN_IMAGES_FOR_SWAP distinct
+                                        // catalog images, else the build fails after the user approves.
+                                        Map<String, Object> iv = (Map<String, Object>) decisionValue;
+                                        String ivCk = iv.get('contentKey') == null ? '' : String.valueOf(iv.get('contentKey'));
+                                        // A decision that names its OWN concrete image (literal contentKey) does
+                                        // not draw from the auto-assign catalog; only auto-assign/asset-ref
+                                        // decisions do. Count the ones that need the catalog.
+                                        if (!ivCk.startsWith('MC')) { imageSwapDecisionCount++; }
+                                        imagePersonalizationLabels.add(ppLabel);
                                     }
                                 }
                             }
@@ -296,6 +364,26 @@ public with sharing class ValidateContentPlanAction {
                                 + 'PersonalizationPoints orphaned. Combine these into ONE PersonalizationPoint '
                                 + 'whose decisions use compound (AND) criteria for each real combination, or '
                                 + 'target separate elements/paragraphs instead.');
+                        }
+                    }
+
+                    // IMAGE-SWAP CATALOG SUFFICIENCY (plan-time, so the user is told BEFORE approving a
+                    // plan that can't build). An image personalization auto-assigns a distinct catalog
+                    // image per decision; with fewer than MIN_IMAGES_FOR_SWAP distinct images the "swap"
+                    // is invisible or impossible and Build fails after approval. Count the org's catalog
+                    // ONCE, only when an image personalization is actually present (one callout, off the
+                    // hot path), and surface it as a plan issue naming the exact fix. Matches the build-
+                    // time guard in BuildDynamicEmailAction (which stays as the backstop).
+                    if (imageSwapDecisionCount > 0) {
+                        Integer catalogImages = countCatalogImages();   // -1 = couldn't verify -> skip (don't block)
+                        Integer need = BuildDynamicEmailAction.MIN_IMAGES_FOR_SWAP;
+                        if (catalogImages >= 0 && catalogImages < need) {
+                            issues.add('This plan personalizes an image ('
+                                + String.join(new List<String>(imagePersonalizationLabels), ', ')
+                                + '), which swaps the picture per audience and needs at least ' + need
+                                + ' distinct images in this org -- but only ' + catalogImages
+                                + ' image(s) are available. Add more stock/brand images, name a specific image '
+                                + 'per decision, or personalize a text slot (heading/paragraph/button) instead.');
                         }
                     }
                 }

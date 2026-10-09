@@ -121,6 +121,24 @@ public with sharing class DataGraphDetailsAction {
         return new Http().send(httpReq);
     }
 
+    // PUBLIC accessor so BuildDynamicEmailAction can fetch a graph's RAW topology payload (not the
+    // flattened fieldsJson) to derive PersonalizationPoint hop chains from the graph's actual shape
+    // instead of hardcoded assumptions. Returns the deserialized Connect-API body (carrying
+    // primaryObjectName + sourceObject.relatedObjects nesting + per-field isKeyColumn), or null on
+    // any non-200 / fetch failure so the caller can degrade to a plain (unpersonalized) email rather
+    // than hard-crash -- mirroring resolveGraphApiName's fail-soft contract.
+    public static Map<String, Object> fetchGraphBody(String accessToken, String graphApiName) {
+        try {
+            HttpResponse r = fetchGraph(accessToken, graphApiName);
+            if (r.getStatusCode() != 200) {
+                return null;
+            }
+            return (Map<String, Object>) JSON.deserializeUntyped(r.getBody());
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     // Resolves the graph to actually query: use the requested name if it's valid, otherwise
     // fall back to discovery via Tooling API. Auto-picks when exactly one graph exists in the
     // org (the common case); otherwise fails loudly with the real list of names rather than

@@ -1013,6 +1013,18 @@ subagent plan:
                 tone&quot; if {!@variables.base_brand_voice} is &quot;None available&quot;.
               - CTA link: the button URL, noting if it is the example.com stand-in.
 
+              THEN, as the LAST line of the summary (always, every time you present it),
+              state plainly what approving does -- because the platform's native
+              Approve/Cancel dialog shows a generic &quot;you're about to send ... to your
+              selected recipients&quot; caption that is MISLEADING for this agent. Say,
+              verbatim or close to it:
+              &quot;Approving will BUILD and SAVE this email in your CMS workspace. It does
+              NOT send anything to any recipients -- the confirm dialog's &apos;send to
+              recipients&apos; wording is a generic Salesforce caption and does not apply
+              here; this only creates the content.&quot;
+              Keep this clarification even when the dialog wording changes -- the agent only
+              ever creates/updates CMS content; it never sends email.
+
               If the user asks for ANY change, (re-)plan it -- call
               {!@actions.note_requested_brand} for a brand change and/or
               {!@actions.note_email_request} for a content change -- then show the

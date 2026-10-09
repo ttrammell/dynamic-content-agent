@@ -2,6 +2,6 @@
 <AiAuthoringBundle xmlns="http://soap.sforce.com/2006/04/metadata">
     <bundleType>AGENT</bundleType>
     <target></target>
-    <versionDescription>Builds and UPDATES personalized Salesforce CMS emails from a data graph: add/retarget dynamic content on an existing email, translate/multilingual support, deterministic brand/asset resolution, confirm-before-build gates, and a connection diagnostic.</versionDescription>
-    <versionTag>2.0</versionTag>
+    <versionDescription>Builds and UPDATES personalized Salesforce CMS emails from a data graph: add/retarget dynamic content on an existing email, translate/multilingual support, deterministic brand/asset resolution, broadened image-catalog discovery with swap-eligibility, confirm-before-build gates, plan-ready guards (no fake summaries or "applied" with nothing built), and a connection diagnostic.</versionDescription>
+    <versionTag>3.0</versionTag>
 </AiAuthoringBundle>

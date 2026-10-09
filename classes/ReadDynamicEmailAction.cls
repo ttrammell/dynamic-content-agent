@@ -215,6 +215,15 @@ public with sharing class ReadDynamicEmailAction {
                 res.blocksJson = JSON.serialize(out);
                 res.eligibleSlotsJson = JSON.serialize(eligible);
 
+                // RAW-HTML detection: the content HAS blocks, but NONE are a recognized personalizable
+                // block type (heading/paragraph/image/actionButton). That's a raw-HTML / rich-text email
+                // -- a single opaque markup block with no addressable sub-blocks to attach a block-level
+                // PersonalizationPoint to. Distinct from "structured email whose slots are all already
+                // personalized": there, slot > 0. Only subject/preheader (an email-level attribute, not a
+                // body block) can be personalized on a raw-HTML email. Without this flag the empty-eligible
+                // path falsely told the user "all slots are already personalized" on an email that has none.
+                Boolean hasRawHtmlOnly = (slot == 0 && !blocks.isEmpty());
+
                 String slotList = String.join(slotLines, ', ');
                 // The closed-set offer, appended to the summary the agent relays verbatim. Rendered as a
                 // BULLET LIST (one "- " line per eligible target) so every option -- including the
@@ -222,7 +231,25 @@ public with sharing class ReadDynamicEmailAction {
                 // trailing comma-clause the LLM demoted the subject/preheader to a footnote; a bullet
                 // keeps it a peer of the numbered slots.)
                 String offer;
-                if (eligible.isEmpty()) {
+                if (hasRawHtmlOnly) {
+                    // Raw-HTML email: a single opaque markup block, so there are NO addressable body
+                    // slots (headings/paragraphs/images/buttons) to personalize individually. The ONLY
+                    // personalizable surface is the email-level subject line + preheader. Two sub-cases:
+                    //  - subject/preheader still eligible  -> offer EXACTLY that (never mention phantom
+                    //    text/image slots, which don't exist here);
+                    //  - subject/preheader already personalized (eligible empty) -> nothing left.
+                    Boolean subjPreEligible = !eligible.isEmpty();   // only the subject/preheader can be in it here
+                    offer = ' This email is built from raw HTML (a single rich-text/markup block), so it has'
+                        + ' no editable content slots (headings, paragraphs, images, or buttons) to personalize'
+                        + ' individually.'
+                        + (subjPreEligible
+                            ? ' The only thing you can personalize is the subject line + preheader (they vary'
+                              + ' together per audience) -- tell me what to vary them by, or say the subject/preheader.'
+                            : ' Only the subject line + preheader could be personalized, and those are already'
+                              + ' personalized here.')
+                        + ' To personalize body content, the email would need to be rebuilt from structured'
+                        + ' content blocks instead of raw HTML.';
+                } else if (eligible.isEmpty()) {
                     offer = ' Nothing is eligible to personalize (all slots and the subject/preheader are already personalized).';
                 } else {
                     List<String> bullets = new List<String>();
@@ -238,12 +265,16 @@ public with sharing class ReadDynamicEmailAction {
                         + MIN_IMAGES_FOR_SWAP + ' distinct images in this org to swap between; only '
                         + imageCatalogCount + ' found, so image slots aren\'t offered. Add more stock/brand images to enable image personalization.)';
                 }
+                // "Slots: X, Y" when the email has recognized block slots; a raw-HTML email has none, so
+                // state that plainly instead of a trailing empty "Slots: ." clause.
+                String slotClause = hasRawHtmlOnly
+                    ? ' No editable content slots (raw-HTML body).'
+                    : ' Slots: ' + slotList + '.';
                 res.summary = (res.isPersonalized
                     ? ('"' + res.title + '" HAS dynamic content: ' + ops.size() + ' personalization point(s) across '
-                        + variants.size() + ' variant(s). PPs: ' + String.join(ppNames, ', ') + '. Slots: '
-                        + slotList + '. (Already-personalized slots cannot be re-personalized.)')
-                    : ('"' + res.title + '" has NO dynamic content -- it is a static email. Slots: '
-                        + slotList + '.')) + offer;
+                        + variants.size() + ' variant(s). PPs: ' + String.join(ppNames, ', ') + '.' + slotClause
+                        + (hasRawHtmlOnly ? '' : ' (Already-personalized slots cannot be re-personalized.)'))
+                    : ('"' + res.title + '" has NO dynamic content -- it is a static email.' + slotClause)) + offer;
             } catch (Exception e) {
                 res.errorMessage = e.getMessage();
             }
@@ -273,24 +304,18 @@ public with sharing class ReadDynamicEmailAction {
         return '';
     }
 
-    // Count DISTINCT images in the org's catalog (brand-less stock library), for the image-DC offer
-    // floor. Best-effort: any failure returns 0, which simply means image slots aren't offered -- never
-    // a hard error on the read. Reuses GetAssetCatalogAction (same brand-less stock fetch the update
-    // pipeline uses), so the count matches what the auto-assign would actually have to draw from.
+    // Count DISTINCT SWAP-ELIGIBLE images in the org's catalog (brand-less stock library), for the
+    // image-DC offer floor. Best-effort: any failure returns 0, which simply means image slots aren't
+    // offered -- never a hard error on the read. Counts via GetAssetCatalogAction.swapEligibleKeys --
+    // the SAME shared pool Build's auto-assign draws from -- so the offer floor and the build agree on
+    // what counts (logos/placeholders are excluded from BOTH, never offered-then-starved).
     private static Integer countCatalogImages() {
         try {
             GetAssetCatalogAction.Request gc = new GetAssetCatalogAction.Request();
             gc.brandName = '';
             gc.includeStock = true;
             String aj = GetAssetCatalogAction.getAssetCatalog(new List<GetAssetCatalogAction.Request>{ gc })[0].assetsJson;
-            if (String.isBlank(aj)) { return 0; }
-            Set<String> keys = new Set<String>();
-            for (Object o : (List<Object>) JSON.deserializeUntyped(aj)) {
-                if (!(o instanceof Map<String, Object>)) { continue; }
-                Object ck = ((Map<String, Object>) o).get('contentKey');
-                if (ck != null && String.isNotBlank(String.valueOf(ck))) { keys.add(String.valueOf(ck)); }
-            }
-            return keys.size();
+            return GetAssetCatalogAction.swapEligibleKeys(aj).size();
         } catch (Exception e) {
             return 0;   // offer floor not met -> image slots simply not offered; no hard fail
         }
