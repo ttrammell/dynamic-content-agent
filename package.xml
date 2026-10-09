@@ -16,6 +16,7 @@
         <members>BuildDynamicEmailAction</members>
         <members>ConfirmBuildAction</members>
         <members>DataGraphDetailsAction</members>
+        <members>DataGraphTopology</members>
         <members>DcPreflightController</members>
         <members>ExpandUpdatePlanSlotsAction</members>
         <members>FillCopyAction</members>
