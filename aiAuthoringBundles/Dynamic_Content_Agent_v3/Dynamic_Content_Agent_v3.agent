@@ -46,7 +46,7 @@ variables:
         description: "Brand record description/identity/tone from Find Brand Record -- distinct from brandContext, which is only asset pointers. Feeds Write Email Copy's tone. \"None available\" until looked up or no brand record found."
 
     base_brand_allRecordsJson: mutable string = ""
-        description: "Every CMS brand record's name+contentKey (no voice -- fetched separately per selected brand), cached once at session start. Use to confirm a brand exists and get its contentKey without a live call."
+        description: "Every brand's name/contentKey/workspaceId, cached at session start. When base_brand_workspaceOverride is set, list only rows whose workspaceId matches it; if none match, say no brands in the active workspace. Blank override lists all."
 
     base_data_fieldsJson: mutable string = ""
         description: "This org's Data Cloud data graph fields, fetched once at session start. Empty if auto-resolve failed -- check dataGraphCount, not this field, to see why."
@@ -115,7 +115,7 @@ variables:
         description: "CMS workspace id for the chosen brand (or org default), resolved at checklist step 2. Needed to build deterministically -- never leave this for the LLM to fill in at build time."
 
     base_brand_workspaceOverride: mutable string = ""
-        description: "Optional user-pinned CMS workspace id, set by note_workspace_override when the user explicitly supplies one. Resolve Branding uses it as tier-0 (wins over auto-resolution). Blank = auto-resolve. Persists across requests until the user changes it."
+        description: "User-pinned CMS workspace id (note_workspace_override). Resolve Branding uses it as tier-0; blank = auto-resolve. Also scopes brand listing to this workspace: a brand from another workspace can't be used by an email here."
 
     base_brand_include: mutable boolean = True
         description: "Whether the banner/footer wraps the email at all -- resolved once at checklist step 2, stored durably instead of re-derived at build time."
@@ -804,6 +804,19 @@ subagent plan:
               contents. If you don't have the content key, ask the user for it (or confirm which
               email) before answering. This is a hard rule: a plausible-sounding but invented
               summary is worse than asking.
+
+              *** LISTING BRANDS -- ALWAYS SCOPE TO THE ACTIVE WORKSPACE ***
+              When the user asks what brands exist / to list brands / which brand to use, answer
+              from base_brand_allRecordsJson, but you MUST filter it by the active workspace FIRST:
+              - If base_brand_workspaceOverride is NON-EMPTY: include ONLY rows whose workspaceId
+                EXACTLY equals base_brand_workspaceOverride. Silently drop every other row. If NO row
+                matches, do NOT list any brands from other workspaces -- reply plainly that there are
+                no brands in the active workspace yet, and offer to create one or switch workspaces.
+                A brand in another workspace is UNUSABLE here (the build fails with Invalid ContentKey),
+                so listing it would be actively misleading.
+              - If base_brand_workspaceOverride is EMPTY: list all rows (no workspace pinned yet).
+              This is a hard rule: never present an unfiltered brand list once a workspace is pinned,
+              even though the cached list holds every workspace's brands.
 
               *** UNDERSTANDING GATE (Feature 1 -- a cheap read-back BEFORE spending planning/copy) ***
               After you capture a NEW content request (note_email_request) and before you show the

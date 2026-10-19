@@ -1395,7 +1395,21 @@ public with sharing class BuildDynamicEmailAction {
                 // truncate: the first 15 chars ARE the real id, the trailing 3 are only a
                 // case-insensitivity checksum. See [[feedback_sf_id_15_vs_18]].
                 String spaceOrFolderId = req.contentSpaceOrFolderId;
-                if (spaceOrFolderId != null && spaceOrFolderId.length() == 18) {
+                // Fail-fast if the workspace never resolved (e.g. a rate-limit interrupted the
+                // confirm->build pipeline and the build fired with stale/blank state). Without this,
+                // a blank id reaches the CMS create POST and returns the cryptic
+                // "content type(s) sfdc_cms__email are not supported by this space" 400 -- which
+                // misleadingly blames the space, not the real cause (no workspace resolved). Stop
+                // here with an actionable message instead.
+                if (String.isBlank(spaceOrFolderId)) {
+                    res.success = false;
+                    res.errorMessage = 'Workspace not resolved -- no CMS workspace was set for this '
+                        + 'build (the pipeline may have been interrupted). Re-select a workspace '
+                        + '(or clear any workspace override) and try the build again. Nothing was created.';
+                    results.add(res);
+                    continue;
+                }
+                if (spaceOrFolderId.length() == 18) {
                     spaceOrFolderId = spaceOrFolderId.substring(0, 15);
                 }
                 Map<String, Object> createPayload = new Map<String, Object>{
