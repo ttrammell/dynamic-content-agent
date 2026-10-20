@@ -108,7 +108,34 @@ public with sharing class DataGraphDetailsAction {
                 names.add(String.valueOf(((Map<String, Object>) recordObj).get('DeveloperName')));
             }
         }
-        return names;
+
+        // Keep only graphs in a bindable (READY) state. A DRAFT / CREATING / UPDATING /
+        // EDITING* / ERROR / DELETING graph cannot host a PersonalizationPoint -- binding one
+        // fails the build with INVALID_API_INPUT 400 "Data Graph must be in a non-draft state"
+        // (confirmed live on TTR0, which carries a READY RT_Data_Graph alongside a DRAFT
+        // Real_Time_Data_Graph). Filtering here is load-bearing for EVERY downstream path:
+        // the size==1 auto-pick, the richest-graph pick, AND the ambiguous availableNames list
+        // the agent asks the user to choose from -- none must ever surface a draft. Status is
+        // NOT on the Tooling DataGraphDefinition object (describe shows only DeveloperName /
+        // MasterLabel / timestamps); it lives on the queryable DataGraph entity, joined by
+        // DataGraph.DataGraphApiName == DataGraphDefinition.DeveloperName. Plain SOQL, no callout.
+        // Fail-soft: if the DataGraph query itself fails, fall back to the unfiltered list rather
+        // than blind the session to every graph (a spurious "no graphs configured").
+        try {
+            Set<String> ready = new Set<String>();
+            for (DataGraph g : [SELECT DataGraphApiName FROM DataGraph WHERE Status = 'READY']) {
+                ready.add(g.DataGraphApiName);
+            }
+            List<String> usable = new List<String>();
+            for (String n : names) {
+                if (ready.contains(n)) { usable.add(n); }
+            }
+            return usable;
+        } catch (Exception e) {
+            System.debug('DataGraphDetailsAction: READY-status filter skipped (DataGraph query '
+                + 'failed: ' + e.getMessage() + ') -- returning unfiltered graph list.');
+            return names;
+        }
     }
 
     private static HttpResponse fetchGraph(String accessToken, String graphApiName) {
