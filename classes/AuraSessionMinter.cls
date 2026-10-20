@@ -124,8 +124,19 @@ public class AuraSessionMinter {
      * lightning.force.com landing page.
      */
     public static Session mint(String accessToken, String instanceUrl) {
-        String prefix = instanceUrl.removeEnd('/').replaceAll('^https?://', '').split('\\.')[0];
-        String lightningHost = prefix + '.lightning.force.com';
+        // Derive the Lightning host from the FULL My-Domain, preserving a ".demo"
+        // infix (DEMO-reclassified orgs: tt-r0.demo.my.salesforce.com) and any
+        // multi-segment domain. The old `.split('.')[0]` took only the first label
+        // (tt-r0), so the expected landing host (tt-r0.lightning.force.com) never
+        // matched the real one (tt-r0.demo.lightning.force.com) and mint threw.
+        // Mirrors BuildDynamicEmailAction's `.replace('.my.salesforce.com', ...)`.
+        String host0 = instanceUrl.removeEnd('/').replaceAll('^https?://', '').split('/')[0];
+        String lightningHost = host0
+            .replace('.sandbox.my.salesforce.com', '.lightning.force.com')
+            .replace('.my.salesforce.com', '.lightning.force.com');
+        String prefix = host0
+            .removeEnd('.my.salesforce.com')
+            .removeEnd('.sandbox.my.salesforce.com');
 
         String url = instanceUrl.removeEnd('/') + '/secur/frontdoor.jsp?sid='
             + EncodingUtil.urlEncode(accessToken, 'UTF-8') + '&retURL=%2Flightning%2Fpage%2Fhome';
