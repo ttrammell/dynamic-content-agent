@@ -116,14 +116,21 @@ public with sharing class DataGraphTopology {
             throw new TopologyException('Field "' + fieldApiName + '" is not present in data graph '
                 + '(root ' + rootDmo + ') -- personalization on this field is unsupported on this org\'s graph.');
         }
-        // 1. explicit DMO hint
+        // 1. explicit DMO hint — DISAMBIGUATION ONLY. The hint (e.g. the Recipient
+        // scope's hard-coded 'UnifiedIndividual__dlm') is a preference among valid
+        // candidates, NOT a hard requirement. When the hint names a node that does
+        // not carry this field in THIS org's graph (e.g. graphs rooted at
+        // 'UnifiedssotIndividualColl__dlm', where ssot__FirstName__c lives on the
+        // root, not UnifiedIndividual__dlm), fall through to the identity/shallowest
+        // selection below instead of failing loud — the field demonstrably exists in
+        // the graph, just on a different node.
         if (String.isNotBlank(preferredDmo)) {
             for (Node n : candidates) {
                 if (n.dmo == preferredDmo) { return n; }
             }
-            // Hint given but field not on it -> fail loud (the plan asked for an unsupported placement).
-            throw new TopologyException('Field "' + fieldApiName + '" is not on DMO "' + preferredDmo
-                + '" in this data graph (root ' + rootDmo + ') -- it is on: ' + dmosOf(candidates) + '.');
+            System.debug('DataGraphTopology: hint DMO "' + preferredDmo + '" does not carry "'
+                + fieldApiName + '" in graph (root ' + rootDmo + '); it is on ' + dmosOf(candidates)
+                + ' — falling back to identity/shallowest selection.');
         }
         // 2. identity-branch pick (longest chain through the identity link)
         Node identityPick = null;
