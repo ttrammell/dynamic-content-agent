@@ -47,10 +47,6 @@
         <name>ExternalClientApplication</name>
     </types>
     <types>
-        <members>AuraPoc_Config.Default</members>
-        <name>CustomMetadata</name>
-    </types>
-    <types>
         <members>dcAgentPreflight</members>
         <name>LightningComponentBundle</name>
     </types>
