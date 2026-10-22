@@ -207,8 +207,67 @@ public with sharing class FillCopyAction {
         return cut.trim();
     }
 
+    // Backstop for the heading-collapse failure mode (see caller): the small fill model often returns
+    // the SAME generic tagline for multiple segments on a short heading. TWO layers, because a prompt
+    // re-roll ALONE proved unreliable live (the re-roll itself returns the duplicate and bounded retries
+    // get exhausted -- confirmed on TTR0, not just isolated tests):
+    //   1. RE-ROLL (organic): regenerate a colliding heading with an explicit "already taken, must
+    //      differ" nudge, up to HEADING_DEDUP_TRIES times. Gives natural, role-specific copy when the
+    //      model cooperates.
+    //   2. DETERMINISTIC FALLBACK (guaranteed): if it STILL collides after the re-rolls, make it unique
+    //      without the model by appending the segment's label (" for <label>"), and if even that
+    //      collides, a numeric discriminator. This guarantees distinct headings every build regardless
+    //      of model behavior -- the re-roll is best-effort polish; the fallback is the actual guarantee.
+    // Mutates byP.
+    private static final Integer HEADING_DEDUP_TRIES = 3;
+    @TestVisible
+    private static void dedupeHeadingVariants(Map<String, Object> byP, Map<String, String> ruleByName,
+            Map<String, String> langByName, Map<String, String> labelByName, String theme, String voice,
+            String spec, String goal, String defaultText, Boolean hasNameAxis) {
+        // Seed "taken" with the default so a variant can't just echo the generic default heading either.
+        Set<String> taken = new Set<String>();
+        if (String.isNotBlank(defaultText)) { taken.add(defaultText.trim().toLowerCase()); }
+        for (String pname : byP.keySet()) {
+            String cell = String.valueOf(byP.get(pname));
+            String normed = cell == null ? '' : cell.trim().toLowerCase();
+            // Layer 1 -- re-roll with the "already taken" nudge.
+            Integer tries = 0;
+            while ((String.isBlank(normed) || taken.contains(normed)) && tries < HEADING_DEDUP_TRIES) {
+                tries++;
+                String avoid = String.join(new List<String>(taken), '" / "');
+                String nudgeSpec = spec + ' The following headings are ALREADY used by other segments and '
+                    + 'you MUST NOT repeat or lightly reword any of them: "' + avoid + '". Write a DIFFERENT '
+                    + 'heading that is specific to THIS segment\'s role and could not be mistaken for the others.';
+                String rule = ruleByName.containsKey(pname) ? ruleByName.get(pname) : 'a specific audience';
+                String lang = langByName.containsKey(pname) ? langByName.get(pname) : 'English';
+                String retry = fillCell(theme, voice, nudgeSpec, goal, rule, lang);
+                if (!hasNameAxis) { retry = stripNameTokensFromBody(retry); }
+                cell = retry;
+                normed = cell == null ? '' : cell.trim().toLowerCase();
+            }
+            // Layer 2 -- deterministic fallback. Still blank or colliding after the re-rolls: force
+            // uniqueness without the model so the swap is never invisible.
+            if (String.isBlank(normed) || taken.contains(normed)) {
+                String base = String.isBlank(cell) ? String.valueOf(defaultText) : cell.trim();
+                if (String.isBlank(base)) { base = 'Welcome'; }   // ultimate floor; defaultText was blank
+                String label = labelByName != null && String.isNotBlank(labelByName.get(pname))
+                    ? labelByName.get(pname).trim() : pname;
+                String candidate = base + ' for ' + label;
+                Integer n = 2;
+                while (taken.contains(candidate.trim().toLowerCase())) {   // extremely unlikely; guarantees termination
+                    candidate = base + ' for ' + label + ' (' + n + ')';
+                    n++;
+                }
+                cell = candidate;
+                normed = cell.trim().toLowerCase();
+            }
+            byP.put(pname, cell);
+            if (String.isNotBlank(normed)) { taken.add(normed); }
+        }
+    }
+
     private static final Map<String, String> TYPE_TO_SPEC = new Map<String, String>{
-        'heading'   => 'Element type: heading. Target length: short, under 12 words. When a specific audience is given, REFLECT it in the heading -- do NOT fall back to a generic brand tagline; make this heading meaningfully different from the generic version and from other segments\' headings.',
+        'heading'   => 'Element type: heading. Target length: short, under 12 words. CRITICAL -- this heading is a PERSONALIZED variant for ONE specific audience (see the RuleCase). The audience\'s role/segment MUST be the subject of the heading: name it or speak directly to its distinct priorities, so a reader in that role sees a headline that could ONLY have been written for them. A generic brand tagline that would fit any audience (e.g. "Discover Connected Solutions Built for Your Business", "Solutions Built for You", "Smarter <thing> for <everyone>") is WRONG here and will be rejected -- never emit one. Two different audiences must never receive the same heading. Prefer a concrete, role-specific hook (the role\'s goal, pain, or decision) over a polished-but-generic line.',
         'paragraph' => 'Element type: paragraph. Target length: 1 to 2 sentences.',
         'button'    => 'Element type: button label. Target length: 2 to 4 words.'
     };
@@ -706,12 +765,38 @@ public with sharing class FillCopyAction {
                     List<Map<String, Object>> ap = persBySlot.get(key);
                     if (ap != null && !ap.isEmpty()) {
                         Map<String, Object> byP = new Map<String, Object>();
+                        // Keep each decision's audience/language so a heading re-roll (below) can
+                        // regenerate a colliding cell with the SAME audience but a "must differ" nudge.
+                        Map<String, String> ruleByName = new Map<String, String>();
+                        Map<String, String> langByName = new Map<String, String>();
+                        // Human segment label per decision, for the deterministic heading-dedup fallback
+                        // (append " for <label>" to a heading that still collides after re-rolls).
+                        Map<String, String> labelByName = new Map<String, String>();
                         for (Map<String, Object> p : ap) {
+                            String pname = String.valueOf(p.get('name'));
                             String rule = buildRuleCase(p) + (hasNameAxis ? '' : NO_GREETING_SUFFIX);
-                            String cell = fillCell(theme, voice, spec, goal, rule, fillLanguageFor(p));
+                            String lang = fillLanguageFor(p);
+                            ruleByName.put(pname, rule);
+                            langByName.put(pname, lang);
+                            labelByName.put(pname, p.get('label') != null ? String.valueOf(p.get('label')) : pname);
+                            String cell = fillCell(theme, voice, spec, goal, rule, lang);
                             if (!hasNameAxis) { cell = stripNameTokensFromBody(cell); }
                             if (isButton) { cell = clampButtonLabel(cell); }
-                            byP.put(String.valueOf(p.get('name')), cell);
+                            byP.put(pname, cell);
+                        }
+                        // DEDUP RE-ROLL (heading only). A short heading is where the small fill model most
+                        // often ignores the "make it audience-specific" directive and returns the SAME
+                        // generic tagline for multiple segments -- producing a personalization that
+                        // visibly swaps nothing (confirmed live on TTR0 even with the forceful spec: 5 of
+                        // 6 title decisions got an identical headline, while the paragraph slot -- same
+                        // loop, longer length -- differentiated fine). A prompt directive alone is not a
+                        // guarantee, so this deterministic backstop regenerates any duplicate heading with
+                        // an explicit list of the headings already taken, up to a bounded number of tries.
+                        // Scoped to headings: paragraphs/buttons don't exhibit this and re-rolling them
+                        // would just burn LLM calls.
+                        if (type == 'heading') {
+                            dedupeHeadingVariants(byP, ruleByName, langByName, labelByName, theme, voice, spec, goal,
+                                String.valueOf(slotCopy.get('default')), hasNameAxis);
                         }
                         slotCopy.put('byPersonalization', byP);
                     }

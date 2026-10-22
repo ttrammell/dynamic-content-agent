@@ -352,6 +352,15 @@ public with sharing class BuildDynamicEmailAction {
             } else {
                 tc.put('values', values);
             }
+        } else if (cmpType == 'NumberComparison') {
+            // A NUMBER targeting rule REQUIRES a `values` field even for a presence ("has value")
+            // check -- without it the DC engine rejects PP creation with "Targeting rule of type
+            // Number is missing required field: values." (A Text presence check needs no values.)
+            // An empty array satisfies the schema while keeping pure-presence semantics -- confirmed
+            // live on a throwaway PP probe (TTR0, RT_Data_Graph, Engagement_Score__c): `has value`
+            // + values:[] ACCEPTED; `is not null` and `>= 0` both REJECTED. See
+            // [[feedback_dc_agent_number_has_value_needs_empty_values]].
+            tc.put('values', new List<Object>());
         }
         return tc;
     }

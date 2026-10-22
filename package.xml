@@ -20,6 +20,7 @@
         <members>DcPreflightController</members>
         <members>ExpandUpdatePlanSlotsAction</members>
         <members>FillCopyAction</members>
+        <members>FillCopyActionTest</members>
         <members>FindBrandAssetsAction</members>
         <members>FindBrandRecordAction</members>
         <members>GetAssetCatalogAction</members>
