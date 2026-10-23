@@ -49,6 +49,17 @@
         <unique>false</unique>
     </fields>
     <fields>
+        <fullName>InstalledVersion__c</fullName>
+        <description>The agent package versionTag that was last deployed into this org (stamped by the installer at deploy time, from the repo bundle-meta). Lets the install page compare installed vs latest to show an upgrade/up-to-date signal. The org does not otherwise retain the package versionTag.</description>
+        <externalId>false</externalId>
+        <fieldManageability>DeveloperControlled</fieldManageability>
+        <label>Installed Version</label>
+        <length>40</length>
+        <required>false</required>
+        <type>Text</type>
+        <unique>false</unique>
+    </fields>
+    <fields>
         <fullName>LogoContentKey__c</fullName>
         <description>ContentKey of the default logo image used in the branding header of generated emails when Include Default Branding is true. Must already exist in this org&apos;s CMS.</description>
         <externalId>false</externalId>
