@@ -141,6 +141,30 @@ public with sharing class AuthDiagnosticAction {
             res.recommendedWorkspaceId = '';
             res.diagnostic = '';
 
+            // PLACEHOLDER GUARD (before the mint): if the config record still carries the install
+            // placeholder ConsumerKey, the JWT mint will fail with "invalid_client" -- which
+            // mapMintError MISdiagnoses as a cert/OAuth-not-enabled problem. The real fix is "finish
+            // OAuth and paste the Consumer Key", so detect it directly and return that message instead
+            // of attempting (and misreporting) the mint. getInstance is null-safe on a fresh org
+            // (record absent -> fall through to the normal mint path). Uses the same 'REPLACE' test as
+            // DcPreflightController.isReal. See [[project_dc_agent_metadata_only]].
+            try {
+                AuraPoc_Config__mdt cfg = AuraPoc_Config__mdt.getInstance('Default');
+                if (cfg != null && cfg.ConsumerKey__c != null && cfg.ConsumerKey__c.contains('REPLACE')) {
+                    res.diagnostic = 'OAuth isn\'t finished for this org -- the agent\'s Consumer Key is '
+                        + 'still the install placeholder, so it can\'t mint a token (no Data Cloud, CMS, or '
+                        + 'personalization). Open Setup -> External Client App Manager -> AuraPoc_JwtApp -> '
+                        + 'Settings -> OAuth Settings, copy the Consumer Key, then paste it into Setup -> '
+                        + 'Custom Metadata Types -> AuraPoc Config -> Default -> ConsumerKey. Then re-run '
+                        + 'this test.';
+                    results.add(res);
+                    continue;
+                }
+            } catch (Exception cfgEx) {
+                // Config record missing/unreadable on a fresh org -> fall through to the mint path,
+                // which fails with its own (correct) "no config record" / mint error.
+            }
+
             String token;
             try {
                 token = tokenSource.getAccessToken();

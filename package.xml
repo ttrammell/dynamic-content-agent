@@ -48,8 +48,13 @@
         <name>ExternalClientApplication</name>
     </types>
     <types>
-        <members>AuraPoc_Config.Default</members>
-        <name>CustomMetadata</name>
+        <members>dcAgentPreflight</members>
+        <name>LightningComponentBundle</name>
     </types>
+    <!-- AuraPoc_Config.Default (CustomMetadata) is intentionally NOT packaged: shipping the
+         seeded record overwrites a target org's live config with REPLACE_ME placeholders on every
+         (re)install, wiping the manually-set ConsumerKey and breaking JWT auth. The
+         AuraPoc_Config__mdt TYPE is still packaged (above); the 'Default' record is populated per
+         org by install.py / by hand. Record file kept in-tree for reference only. -->
     <version>66.0</version>
 </Package>

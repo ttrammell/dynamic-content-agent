@@ -273,6 +273,15 @@ public with sharing class DataGraphDetailsAction {
             } catch (Exception e) {
                 res.success = false;
                 res.errorMessage = e.getMessage();
+                // AUTH/FETCH-FAILURE SENTINEL: a mint failure (e.g. a placeholder ConsumerKey ->
+                // invalid_client) throws here, NOT a NoGraphFoundException. Leaving graphCount null made
+                // the agent's graph decision (which branches on 0/1/>1) fall through to "which data
+                // graph?" -- misreporting an AUTH problem as a graph-choice problem. -2 is a distinct
+                // sentinel (default is -1 = not-yet-checked; real counts are >=0) so the agent can route
+                // this to a "finish OAuth / test connection" stall instead. Consumed by a .agent branch
+                // (follow-up); inert until then (no existing path tests -2). See
+                // [[project_dc_agent_metadata_only]].
+                res.graphCount = -2;
             }
             results.add(res);
         }
