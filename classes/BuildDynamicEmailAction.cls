@@ -321,7 +321,10 @@ public with sharing class BuildDynamicEmailAction {
     // The comparison node's `type` MUST match the field's real data type or the DC platform rejects
     // it ("Predicate type Text is not compatible with the data type of <field>"). Text is the default;
     // Number covers Number/Currency/Percent/Double/Int; DateTime/Date -> DateComparison.
-    private static String comparisonTypeFor(String dataType) {
+    // PUBLIC so ValidateContentPlanAction shares the EXACT same Text/Number/Date classifier -- Validate
+    // uses it to flag (pre-approval) a Number/Date field whose dataType did not thread onto the decision
+    // (which would silently build as Text and 400 at build). One classifier = Validate and Build can't drift.
+    public static String comparisonTypeFor(String dataType) {
         if (String.isBlank(dataType)) { return 'TextComparison'; }
         String d = dataType.toLowerCase();
         if (d.contains('date') || d.contains('time')) { return 'DateComparison'; }
@@ -345,10 +348,29 @@ public with sharing class BuildDynamicEmailAction {
             if (cmpType == 'NumberComparison') {
                 List<Object> nums = new List<Object>();
                 for (Object v : values) {
+                    // A NumberComparison value that won't parse would build a predicate the platform
+                    // rejects with a cryptic 400 (or, worse, a confusing match failure). Fail LOUD here,
+                    // before the PP-create callout, naming the field + the offending value, instead of
+                    // swallowing it and letting the platform surface an opaque error later.
                     try { nums.add(Decimal.valueOf(String.valueOf(v).trim())); }
-                    catch (Exception e) { nums.add(v); /* leave as-is; platform will surface a clear error */ }
+                    catch (Exception e) {
+                        throw new WireException('Personalization on numeric field "' + fieldApiName
+                            + '" has a non-numeric value "' + String.valueOf(v) + '" -- a Number field can '
+                            + 'only match numeric values.');
+                    }
                 }
-                tc.put('values', nums);
+                // A NumberComparison EQUALITY rule wants a SCALAR `value`, not a `values` array -- the PP
+                // engine rejects the array form with "Targeting rule of type Number is missing required
+                // field: values." (misleading: it ignores the array and looks for the scalar). Confirmed
+                // live on SIC2025 (Real_Time_Data_Graph, count_case_id__c): `equal` + value:<n> ACCEPTED;
+                // `equal` + values:[n] REJECTED. (`in` fans out to one single-value `equal` leaf each, so
+                // every numeric `equal` leaf carries exactly one value.) Presence keeps values:[] below.
+                // See [[feedback_dc_agent_number_equals_needs_scalar_value]].
+                if (operator != 'has value' && nums.size() == 1) {
+                    tc.put('value', nums[0]);
+                } else {
+                    tc.put('values', nums);
+                }
             } else {
                 tc.put('values', values);
             }
@@ -686,6 +708,86 @@ public with sharing class BuildDynamicEmailAction {
         };
     }
 
+    // url-mode image block: a direct HTTPS image URL (off-CMS asset, e.g. Contentful) instead of a
+    // CMS contentKey. Same block shape as the contentKey variant; only the imageInfo.source differs.
+    // NOTE: this renders as a PLACEHOLDER in the bare editor canvas (context-bound source). The agent
+    // now routes URL images through htmlImageBlock instead (renders in-canvas); imageUrlBlock is kept
+    // for back-compat / callers that explicitly want a first-class lightning/image url source.
+    private static Map<String, Object> imageUrlBlock(String id, String imageUrl, String altText, Decimal widthPercent) {
+        return new Map<String, Object>{
+            'id' => id,
+            'definition' => 'lightning/image',
+            'type' => 'block',
+            'attributes' => imageAttributes(null, imageUrl, altText, widthPercent, paddingMap(8.0, 16.0, 24.0, 24.0))
+        };
+    }
+
+    // True only on the fresh-BUILD path, where a URL image's BASE block is emitted as lightning/html
+    // (so an html swap variant matches its target). On the UPDATE path this is set false: the target is
+    // a pre-existing lightning/image block, and the platform rejects a rawHtml property on it
+    // (additionalProperties:false) -- so a URL image swap on update must conform to the existing block
+    // as a url-mode lightning/image variant, NOT html. Static (synchronous, single-transaction); Update
+    // sets false before wiring and restores it after. See [[feedback_dc_agent_html_block_pp_swap_supported]].
+    // PUBLIC so UpdateDynamicEmailAction (a separate class) can flip it around its wire call.
+    public static Boolean allowHtmlImageVariants = true;
+
+    // UPDATE-path override: elementKey -> the EXISTING live block's definition, as resolved by
+    // UpdateDynamicEmailAction.recoverBlockIds. When present for a target, the wire path builds that
+    // target's swap variant to match the LIVE block's type rather than the plan's declared
+    // blockDefinition. This closes the url-image+update gap: the fresh-build path renders a URL image
+    // as a lightning/html <img> block, so a later update targeting that slot must emit an html swap
+    // variant too (a lightning/image url-mode variant on an html base renders nothing). Empty on the
+    // fresh-build path (plan blockDefinition governs). Static (synchronous, single-transaction); Update
+    // sets it before wiring and clears it after, in try/finally. See
+    // [[feedback_dc_agent_html_block_pp_swap_supported]].
+    public static Map<String, String> liveBlockDefByElementKey = new Map<String, String>();
+
+    // Pixel width requested from the Contentful Images API for a full-width email image. Email bodies
+    // render at ~600px; requesting that (vs. the raw original) cut a live SIC2025 hero from 457KB to
+    // ~42KB. When section-width-aware layout lands, this becomes per-section (half -> 300, etc.).
+    @TestVisible static Integer CONTENTFUL_IMG_WIDTH = 600;
+
+    // Append Contentful Images API transforms to an images.ctfassets.net URL so the CDN serves a
+    // right-sized, email-weight rendition instead of the full-res original. HOST-GATED (only ctfassets
+    // URLs understand these params) and IDEMPOTENT (skips a URL that already has a query string).
+    // Defaults to fm=jpg (NOT webp/avif -- those are smaller but break Outlook/older mail clients) +
+    // q=75 + w. All params verified to return a valid image live against the real asset. Any non-
+    // Contentful URL is returned unchanged. See [[feedback_dc_agent_html_block_pp_swap_supported]].
+    @TestVisible
+    private static String contentfulRendition(String url, Integer widthPx) {
+        if (String.isBlank(url)) { return url; }
+        if (!url.contains('images.ctfassets.net')) { return url; }   // only Contentful CDN
+        if (url.contains('?')) { return url; }                        // author already set params -> respect
+        Integer w = (widthPx == null || widthPx <= 0) ? CONTENTFUL_IMG_WIDTH : widthPx;
+        return url + '?fm=jpg&q=75&w=' + w;
+    }
+
+    // HTML <img> image block: a lightning/html block whose rawHtml is a presentation-table-wrapped
+    // <img src="<url>">. Used for URL-based (off-CMS, e.g. Contentful) images because, unlike a
+    // lightning/image url source, a literal <img> RENDERS in the bare editor canvas (no "preview as
+    // contact" needed). Proven on SIC2025 as a base block AND a per-decision PP swap variant. See
+    // [[feedback_dc_agent_html_block_pp_swap_supported]].
+    //
+    // rawHtml is passed as PLAIN HTML (not pre-encoded): the CMS create/PUT pipeline HTML-encodes
+    // rawHtml exactly once on store (a GET returns it as &lt;img...). Pre-encoding here produced a
+    // DOUBLE-encode (&amp;lt;img) that renders as literal broken text -- confirmed live, then fixed.
+    private static Map<String, Object> htmlImageBlock(String id, String imageUrl, String altText, Decimal widthPercent) {
+        Integer w = (widthPercent == null || widthPercent <= 0) ? 100 : Integer.valueOf(widthPercent);
+        String src = contentfulRendition(imageUrl, CONTENTFUL_IMG_WIDTH);   // CDN-resize Contentful URLs
+        String plainAlt = clampAltText(altText);
+        if (plainAlt == null) { plainAlt = ''; }
+        String raw =
+            '<table role="presentation" width="100%" cellpadding="0" cellspacing="0"><tbody><tr>' +
+            '<td align="center"><img src="' + src + '" style="width:' + w + '%;max-width:100%;height:auto;display:block;" alt="' + plainAlt + '" /></td>' +
+            '</tr></tbody></table>';
+        return new Map<String, Object>{
+            'id' => id,
+            'definition' => 'lightning/html',
+            'type' => 'block',
+            'attributes' => new Map<String, Object>{ 'rawHtml' => raw }
+        };
+    }
+
     // Image altText lives in the same `attributes` object as a button's label text, whose org hard
     // limit is 255 (confirmed live: "attributes.text may only be 255 characters long"). altText is
     // plan-authored (LLM) and otherwise unclamped, so a verbose alt string would fail the PUT the same
@@ -703,11 +805,26 @@ public with sharing class BuildDynamicEmailAction {
     }
 
     private static Map<String, Object> imageAttributes(String contentKey, String altText, Decimal widthPercent, Map<String, Object> padding) {
-        return new Map<String, Object>{
-            'imageFitConfig' => new Map<String, Object>{
-                'width' => new Map<String, Object>{ 'unit' => '%', 'value' => widthPercent }
-            },
-            'imageInfo' => new Map<String, Object>{
+        return imageAttributes(contentKey, null, altText, widthPercent, padding);
+    }
+
+    // imageUrl != null selects "url" source mode: a direct HTTPS link (e.g. a Contentful CDN asset),
+    // with NO CMS contentKey. MC Next's lightning/image supports source.type "url" where ref is a
+    // bare HTTPS string (verified live on SIC2025: create 201 + readback preserved source.type=url).
+    // Used for assets that live outside the org's CMS -- the catalog carries assetUrl instead of a
+    // contentKey, so there is nothing to publish to CMS first. contentKey mode is unchanged.
+    private static Map<String, Object> imageAttributes(String contentKey, String imageUrl, String altText, Decimal widthPercent, Map<String, Object> padding) {
+        Boolean urlMode = String.isNotBlank(imageUrl);
+        Map<String, Object> imageInfo = urlMode
+            ? new Map<String, Object>{
+                // url mode: ref is a bare HTTPS string, type "url", and NO /cms/media url (that path
+                // only resolves CMS contentKeys). An external image can't be linked back to a
+                // ManagedContent record, so it renders but isn't CMS-selectable -- expected for an
+                // off-CMS asset.
+                'source' => new Map<String, Object>{ 'ref' => contentfulRendition(imageUrl, CONTENTFUL_IMG_WIDTH), 'type' => 'url' },
+                'altText' => clampAltText(altText)
+            }
+            : new Map<String, Object>{
                 'source' => new Map<String, Object>{
                     // ref MUST be the object form {"contentKey": "MC..."}, matching the marketing
                     // toolkit's proven _img_block helper (web/app.py) and the native CMS email
@@ -724,7 +841,12 @@ public with sharing class BuildDynamicEmailAction {
                 },
                 'url' => '/cms/media/' + contentKey,
                 'altText' => clampAltText(altText)
+            };
+        return new Map<String, Object>{
+            'imageFitConfig' => new Map<String, Object>{
+                'width' => new Map<String, Object>{ 'unit' => '%', 'value' => widthPercent }
             },
+            'imageInfo' => imageInfo,
             'lightning:horizontalAlignment' => 'center',
             // Images space with lightning:margin, NOT lightning:padding -- matches the marketing
             // toolkit's proven _img_block helper (web/app.py) and the native builder. Padding on an
@@ -834,6 +956,18 @@ public with sharing class BuildDynamicEmailAction {
         } else if (type == 'paragraph') {
             return paragraphBlock(id, sanitizeText(String.valueOf(el.get('text'))));
         } else if (type == 'image') {
+            // Off-CMS asset: resolveImageRefs stamped a direct HTTPS url (e.g. Contentful CDN) instead
+            // of a contentKey. Emit a url-mode image block and skip the CMS-contentKey guard below.
+            String imgUrl = String.isNotBlank(String.valueOf(el.get('url'))) ? String.valueOf(el.get('url')) : '';
+            if (String.isNotBlank(imgUrl)) {
+                // URL-based (off-CMS, e.g. Contentful) image -> render as a lightning/html <img> block,
+                // NOT lightning/image url-mode. Rationale (user-directed): a url-mode lightning/image
+                // shows a PLACEHOLDER in the bare editor canvas (it is a context-bound source that only
+                // resolves under "preview as contact"), whereas a literal <img> in an html block renders
+                // in the canvas. CMS-key images keep lightning/image (first-class block) below. Per-image
+                // routing: each image uses the block type that renders best for ITS source.
+                return htmlImageBlock(id, imgUrl, sanitizeText(String.valueOf(el.get('altText'))), asDecimal(el.get('widthPercent'), 100.0));
+            }
             // el.get('contentKey') is Apex null (not the string "null") when the key is
             // missing entirely -- confirmed live this NPEs Pattern.matches below instead of
             // reaching the clear "invalid contentKey" message. Normalize to '' first.
@@ -923,7 +1057,10 @@ public with sharing class BuildDynamicEmailAction {
     // slips through as an opaque CMS 404.
     private static void resolveImageRefs(List<Object> elements, Request req) {
         // Build name -> contentKey from the asset catalog (exact, case-insensitive on trimmed name).
+        // Also build name -> assetUrl for off-CMS assets (e.g. Contentful heroes) that carry a direct
+        // HTTPS url instead of a CMS contentKey. An asset counts as resolvable if it has EITHER.
         Map<String, String> keyByName = new Map<String, String>();
+        Map<String, String> urlByName = new Map<String, String>();
         Map<String, Integer> nameCount = new Map<String, Integer>();
         if (String.isNotBlank(req.assetsJson)) {
             Object parsed;
@@ -935,8 +1072,10 @@ public with sharing class BuildDynamicEmailAction {
                     Map<String, Object> a = (Map<String, Object>) o;
                     String nm = a.get('name') == null ? '' : String.valueOf(a.get('name')).trim().toLowerCase();
                     String ck = a.get('contentKey') == null ? '' : String.valueOf(a.get('contentKey'));
-                    if (String.isBlank(nm) || String.isBlank(ck)) { continue; }
-                    keyByName.put(nm, ck);
+                    String au = a.get('assetUrl') == null ? '' : String.valueOf(a.get('assetUrl'));
+                    if (String.isBlank(nm) || (String.isBlank(ck) && String.isBlank(au))) { continue; }
+                    if (String.isNotBlank(ck)) { keyByName.put(nm, ck); }
+                    else { urlByName.put(nm, au); }
                     nameCount.put(nm, (nameCount.containsKey(nm) ? nameCount.get(nm) : 0) + 1);
                 }
             }
@@ -946,9 +1085,10 @@ public with sharing class BuildDynamicEmailAction {
             Map<String, Object> el = (Map<String, Object>) elObj;
             if (String.valueOf(el.get('type')) != 'image') { continue; }
 
-            // Already has a literal key (back-compat / other callers) -> leave it; the existence
-            // guard downstream still verifies it.
+            // Already has a literal key or a direct url (back-compat / other callers) -> leave it;
+            // the downstream guard still verifies a contentKey, and a url is emitted as url-mode.
             if (String.isNotBlank(String.valueOf(el.get('contentKey')))) { continue; }
+            if (String.isNotBlank(String.valueOf(el.get('url')))) { continue; }
 
             String role = el.get('assetRole') == null ? '' : String.valueOf(el.get('assetRole')).trim().toLowerCase();
             String assetName = el.get('assetName') == null ? '' : String.valueOf(el.get('assetName')).trim();
@@ -979,7 +1119,9 @@ public with sharing class BuildDynamicEmailAction {
                         + '" references asset "' + assetName + '", which is ambiguous (' + cnt
                         + ' assets share that name). Reference it a different way or rename the assets.');
                 }
-                el.put('contentKey', keyByName.get(nmKey));
+                // CMS asset -> contentKey; off-CMS asset (Contentful) -> direct url (url-mode block).
+                if (keyByName.containsKey(nmKey)) { el.put('contentKey', keyByName.get(nmKey)); }
+                else { el.put('url', urlByName.get(nmKey)); }
                 continue;
             }
 
@@ -994,6 +1136,61 @@ public with sharing class BuildDynamicEmailAction {
     // Build a name(lowercased)->contentKey map + a name->count (for ambiguity) from an assets JSON
     // catalog. Shared by base-element and variant-image resolution.
     private static void buildAssetNameMap(String assetsJson, Map<String, String> keyByName, Map<String, Integer> nameCount) {
+        buildAssetNameMap(assetsJson, keyByName, null, nameCount);
+    }
+
+    // Overload that also fills name->assetUrl for off-CMS (Contentful) assets that have an assetUrl
+    // and no contentKey. An asset counts toward nameCount if it has EITHER a contentKey or an
+    // assetUrl, so url-only assets are resolvable by name in the variant-swap path too.
+    // Normalize a ManagedContentSpace Id for comparison: the CMS create endpoint and the catalog use
+    // different Id widths (15-char legacy case-sensitive vs 18-char case-insensitive), so compare on
+    // the uppercased 15-char prefix -- the first 15 chars ARE the real id; the trailing 3 are only a
+    // case checksum. See [[feedback_sf_id_15_vs_18]].
+    @TestVisible
+    private static String normalizeSpaceId(String id) {
+        if (String.isBlank(id)) { return ''; }
+        String s = id.trim();
+        if (s.length() > 15) { s = s.substring(0, 15); }
+        return s.toUpperCase();
+    }
+
+    // Workspace guard: an email is built into ONE CMS workspace, but the asset catalog is discovered
+    // across EVERY workspace (FindBrandAssetsAction filters by name/type only). A CMS image from another
+    // workspace can't be referenced from this email -- the variant/base PUT 403s with INVALID_INPUT
+    // ("includes other content that isn't shared with this workspace") and the whole build rolls back.
+    // So drop any CMS asset (one with a contentKey) whose workspaceId != the target workspace BEFORE
+    // resolution, leaving same-workspace CMS assets and all off-CMS (Contentful url) assets untouched.
+    // Returns the filtered assetsJson; also reports (via droppedNames) which named assets were removed so
+    // the caller can surface a clear message instead of a later opaque 403. An asset with NO workspaceId
+    // is kept (back-compat: a catalog serialized before workspaceId was stamped, or a url asset). See
+    // [[project_dc_agent_workspace_scoped_brands]].
+    @TestVisible
+    private static String filterAssetsToWorkspace(String assetsJson, String targetSpaceId, List<String> droppedNames) {
+        if (String.isBlank(assetsJson) || String.isBlank(targetSpaceId)) { return assetsJson; }
+        Object parsed;
+        try { parsed = JSON.deserializeUntyped(AuraPocJson.stripFence(assetsJson)); }
+        catch (Exception e) { return assetsJson; }
+        if (!(parsed instanceof List<Object>)) { return assetsJson; }
+        String want = normalizeSpaceId(targetSpaceId);
+        List<Object> kept = new List<Object>();
+        for (Object o : (List<Object>) parsed) {
+            if (!(o instanceof Map<String, Object>)) { kept.add(o); continue; }
+            Map<String, Object> a = (Map<String, Object>) o;
+            String ck = a.get('contentKey') == null ? '' : String.valueOf(a.get('contentKey'));
+            String wsId = a.get('workspaceId') == null ? '' : String.valueOf(a.get('workspaceId'));
+            // Only CMS assets that KNOW their workspace are subject to the guard. Off-CMS (url) assets
+            // and workspace-unknown assets pass through.
+            if (String.isNotBlank(ck) && String.isNotBlank(wsId) && normalizeSpaceId(wsId) != want) {
+                if (droppedNames != null && a.get('name') != null) { droppedNames.add(String.valueOf(a.get('name'))); }
+                continue;   // off-workspace CMS image -> not referenceable from this email
+            }
+            kept.add(o);
+        }
+        return JSON.serialize(kept);
+    }
+
+    private static void buildAssetNameMap(String assetsJson, Map<String, String> keyByName,
+            Map<String, String> urlByName, Map<String, Integer> nameCount) {
         if (String.isBlank(assetsJson)) { return; }
         Object parsed;
         try { parsed = JSON.deserializeUntyped(AuraPocJson.stripFence(assetsJson)); }
@@ -1004,8 +1201,10 @@ public with sharing class BuildDynamicEmailAction {
             Map<String, Object> a = (Map<String, Object>) o;
             String nm = a.get('name') == null ? '' : String.valueOf(a.get('name')).trim().toLowerCase();
             String ck = a.get('contentKey') == null ? '' : String.valueOf(a.get('contentKey'));
-            if (String.isBlank(nm) || String.isBlank(ck)) { continue; }
-            keyByName.put(nm, ck);
+            String au = a.get('assetUrl') == null ? '' : String.valueOf(a.get('assetUrl'));
+            if (String.isBlank(nm) || (String.isBlank(ck) && String.isBlank(au))) { continue; }
+            if (String.isNotBlank(ck)) { keyByName.put(nm, ck); }
+            else if (urlByName != null) { urlByName.put(nm, au); }
             nameCount.put(nm, (nameCount.containsKey(nm) ? nameCount.get(nm) : 0) + 1);
         }
     }
@@ -1028,18 +1227,54 @@ public with sharing class BuildDynamicEmailAction {
     // bug, reproduced live inside variants). A literal contentKey is left for the existence guard.
     // Mutates ppSpecs in place; returns the set of resolved variant image keys to existence-check.
     // Shared by Build and Update (called via sharedResolveVariantImageRefs).
+    // Element keys referenced by any personalization target, from personalizationsJson. Fail-soft to
+    // empty on any parse issue (the element loop just keeps its normal behavior). Used to protect a
+    // personalized image from the banner-duplicate drop.
+    private static Set<String> collectPersonalizedElementKeys(String personalizationsJson) {
+        Set<String> out = new Set<String>();
+        if (String.isBlank(personalizationsJson)) { return out; }
+        try {
+            Object parsed = JSON.deserializeUntyped(AuraPocJson.stripFence(personalizationsJson));
+            if (!(parsed instanceof List<Object>)) { return out; }
+            for (Object ppObj : (List<Object>) parsed) {
+                if (!(ppObj instanceof Map<String, Object>)) { continue; }
+                Object tj = ((Map<String, Object>) ppObj).get('targetsJson');
+                if (tj == null) { continue; }
+                Object targets = JSON.deserializeUntyped(String.valueOf(tj));
+                if (!(targets instanceof List<Object>)) { continue; }
+                for (Object tObj : (List<Object>) targets) {
+                    if (!(tObj instanceof Map<String, Object>)) { continue; }
+                    String ek = String.valueOf(((Map<String, Object>) tObj).get('elementKey'));
+                    if (String.isNotBlank(ek) && ek != 'null') { out.add(ek); }
+                }
+            }
+        } catch (Exception e) { return new Set<String>(); }
+        return out;
+    }
+
     private static Set<String> resolveVariantImageRefs(List<Object> ppSpecs, String assetsJson,
             String logoKey, String headerKey) {
         Set<String> keys = new Set<String>();
         Map<String, String> keyByName = new Map<String, String>();
+        Map<String, String> urlByName = new Map<String, String>();   // off-CMS (Contentful) assets by name
         Map<String, Integer> nameCount = new Map<String, Integer>();
-        buildAssetNameMap(assetsJson, keyByName, nameCount);
+        buildAssetNameMap(assetsJson, keyByName, urlByName, nameCount);
         // Ordered, DISTINCT list of catalog image contentKeys, for the deterministic auto-assign
         // fallback below: when the plan personalizes an image slot but the model picked NO asset for a
         // decision (common with generic stock that fits no business axis), we still want a visible,
         // different image per audience -- so we hand each such decision the next distinct catalog image
         // (round-robin), rather than failing the whole update. Order = catalog order (stable per run).
-        List<String> catalogKeys = orderedCatalogKeys(assetsJson);
+        // The auto-assign pool is contentKey assets FIRST, then off-CMS url assets -- one combined
+        // round-robin so a decision gets a distinct image regardless of source. EXCLUDE the resolved
+        // banner logo/header keys: they render in the banner already, so auto-assigning one as a body
+        // swap makes a duplicate that Build drops (orphaning the PP target). Excluding by exact key
+        // keeps other header/hero images swappable.
+        Set<String> bannerKeys = new Set<String>();
+        if (String.isNotBlank(logoKey)) { bannerKeys.add(logoKey); }
+        if (String.isNotBlank(headerKey)) { bannerKeys.add(headerKey); }
+        List<String> catalogKeys = GetAssetCatalogAction.swapEligibleKeys(assetsJson, bannerKeys);
+        List<String> catalogUrls = GetAssetCatalogAction.swapEligibleUrls(assetsJson);
+        Integer autoPoolSize = catalogKeys.size() + catalogUrls.size();
 
         for (Object ppObj : ppSpecs) {
             Map<String, Object> pp = (Map<String, Object>) ppObj;
@@ -1059,6 +1294,9 @@ public with sharing class BuildDynamicEmailAction {
                 for (String dec : byDec.keySet()) {
                     if (!(byDec.get(dec) instanceof Map<String, Object>)) { continue; }
                     Map<String, Object> img = (Map<String, Object>) byDec.get(dec);
+                    // Already carries a direct url (off-CMS asset, pre-resolved) -> leave as-is; the
+                    // variant builder emits url-mode and there's no contentKey to existence-check.
+                    if (String.isNotBlank(String.valueOf(img.get('url')))) { continue; }
                     String existing = img.get('contentKey') == null ? '' : String.valueOf(img.get('contentKey'));
                     String role = img.get('assetRole') == null ? '' : String.valueOf(img.get('assetRole')).trim().toLowerCase();
                     String assetName = img.get('assetName') == null ? '' : String.valueOf(img.get('assetName')).trim();
@@ -1084,9 +1322,26 @@ public with sharing class BuildDynamicEmailAction {
                             throw new ElementException('Image-swap variant references asset "' + assetName
                                 + '", which is ambiguous (' + cnt + ' assets share that name).');
                         }
-                        resolved = keyByName.get(nmKey);
-                        img.put('contentKey', resolved); changed = true;
-                    } else if (!catalogKeys.isEmpty()) {
+                        if (keyByName.containsKey(nmKey)) {
+                            resolved = keyByName.get(nmKey);
+                            // A named body-image swap that resolves to the banner logo/header key would
+                            // render the banner image twice (and Build drops the body copy, orphaning
+                            // the PP). Reject with a clear message so the plan picks a different image,
+                            // rather than silently producing a broken swap. (Role logo/header above is
+                            // a deliberate ask and is left alone.)
+                            if (bannerKeys.contains(resolved)) {
+                                throw new ElementException('Image-swap variant references asset "' + assetName
+                                    + '", but that image is already the email\'s logo/header banner -- it '
+                                    + 'can\'t also be a per-audience body image. Pick a different image for '
+                                    + 'this swap.');
+                            }
+                            img.put('contentKey', resolved); changed = true;
+                        } else {
+                            // Off-CMS (Contentful) asset -> stamp a direct url; variant builder emits
+                            // url-mode. Not added to `keys` (that set is contentKey existence-checked).
+                            img.put('url', urlByName.get(nmKey)); img.remove('contentKey'); changed = true;
+                        }
+                    } else if (autoPoolSize > 0) {
                         // DETERMINISTIC AUTO-ASSIGN: the plan personalized this image slot but named no
                         // asset for this decision. Hand this decision the next DISTINCT catalog image so
                         // the audience sees a different picture. INSUFFICIENT-IMAGES GUARD: if there are
@@ -1095,15 +1350,22 @@ public with sharing class BuildDynamicEmailAction {
                         // the "swap" is invisible. Fail loud here (before any variant ships) with the counts
                         // instead. (ReadDynamicEmailAction's >= MIN_IMAGES_FOR_SWAP offer floor prevents the
                         // common case; this backstops when a request slips through with too many values.)
-                        if (autoIdx >= catalogKeys.size()) {
+                        if (autoIdx >= autoPoolSize) {
                             throw new ElementException('Personalizing this image by ' + (autoIdx + 1)
                                 + ' or more values needs that many distinct images, but this org has only '
-                                + catalogKeys.size() + ' image(s) to swap between. Reduce the number of values, '
+                                + autoPoolSize + ' image(s) to swap between. Reduce the number of values, '
                                 + 'name a specific image per value, or add more stock/brand images.');
                         }
-                        resolved = catalogKeys[autoIdx];
+                        // Combined pool: contentKey assets first, then off-CMS url assets. A url pick is
+                        // stamped as `url` (url-mode) and NOT added to the contentKey existence set.
+                        if (autoIdx < catalogKeys.size()) {
+                            resolved = catalogKeys[autoIdx];
+                            img.put('contentKey', resolved); img.remove('url'); changed = true;
+                        } else {
+                            String au = catalogUrls[autoIdx - catalogKeys.size()];
+                            img.put('url', au); img.remove('contentKey'); changed = true;
+                        }
                         autoIdx++;
-                        img.put('contentKey', resolved); changed = true;
                     } else {
                         throw new ElementException('Personalizing an image means swapping the picture per '
                             + 'audience, but this org has no images to swap between. Add stock or brand '
@@ -1213,13 +1475,35 @@ public with sharing class BuildDynamicEmailAction {
 
                 List<Object> elements = (List<Object>) JSON.deserializeUntyped(AuraPocJson.stripFence(req.elementsJson));
 
+                // WORKSPACE GUARD: confine the asset catalog to THIS email's workspace before any image
+                // resolution. The catalog is discovered org-wide, but a CMS image from another workspace
+                // can't be referenced from this email (the base/variant PUT 403s and the build rolls
+                // back). Filter req.assetsJson in place so every downstream consumer (base resolution,
+                // variant resolution, the auto-assign swap pool) only ever sees same-workspace CMS assets
+                // and off-CMS (Contentful url) assets. See [[project_dc_agent_workspace_scoped_brands]].
+                List<String> droppedXwsAssets = new List<String>();
+                req.assetsJson = filterAssetsToWorkspace(req.assetsJson, req.contentSpaceOrFolderId, droppedXwsAssets);
+
                 // Deterministically resolve every image element's contentKey from an asset ROLE or
                 // NAME, so the LLM never has to transcribe an MC-key (a more capable model corrupted
                 // one by a single character -- MC3.. vs the real MC4.. -- which is far worse than an
                 // obvious fake). role=logo/header -> the already-resolved override keys; a name ->
                 // an exact match in the asset catalog. A literal contentKey is still honored for
                 // back-compat. Rewrites el.contentKey in place; fails loud on an unresolvable ref.
-                resolveImageRefs(elements, req);
+                // A name dropped by the workspace guard above surfaces here as "does not exist in this
+                // org's brand assets" -- make that specific: name the workspace mismatch instead.
+                try {
+                    resolveImageRefs(elements, req);
+                } catch (ElementException ee) {
+                    if (!droppedXwsAssets.isEmpty() && ee.getMessage() != null && ee.getMessage().contains('does not exist in this org')) {
+                        throw new ElementException(ee.getMessage()
+                            + ' NOTE: ' + droppedXwsAssets.size() + ' catalog image(s) ('
+                            + String.join(droppedXwsAssets, ', ') + ') were excluded because they live in a '
+                            + 'different CMS workspace than this email and can\'t be referenced here. Pick an '
+                            + 'image from this email\'s workspace, or build into the image\'s workspace.');
+                    }
+                    throw ee;
+                }
 
                 // The equality guard above only catches a brand/logo mixup when the SAME wrong
                 // key is reused in two places -- confirmed live it doesn't help when the wrong
@@ -1256,6 +1540,16 @@ public with sharing class BuildDynamicEmailAction {
                 Map<String, Object> expressionsByKey = new Map<String, Object>();
                 Boolean bodyBranding = req.includeBranding == null ? true : req.includeBranding;
 
+                // Element keys that a personalization targets (from personalizationsJson). A
+                // personalized image MUST keep its block even if its contentKey happens to match the
+                // banner logo/header -- dropping it as a "banner duplicate" (below) would leave the
+                // PP target with no block, which passes Validate (it counts the element) but then
+                // throws "unknown element key" at wire time and rolls the whole build back. Confirmed
+                // live: a plan with logo/header branding + a PrimaryIndustry image swap on body_image
+                // validated clean, then the banner-duplicate drop removed body_image and the build
+                // rolled back. See [[feedback_dc_agent_build_drops_personalized_banner_dup_image]].
+                Set<String> personalizedElementKeys = collectPersonalizedElementKeys(req.personalizationsJson);
+
                 // Auto-section: every image/button becomes its own section (hero image, CTA),
                 // consecutive heading/paragraph elements stay grouped in a shared text section --
                 // a single flat section/column for the whole body was a known quality gap versus
@@ -1274,7 +1568,11 @@ public with sharing class BuildDynamicEmailAction {
                     // contentKey the banner is about to render, rather than relying on the
                     // drafting prompt to avoid it.
                     String elType = String.valueOf(el.get('type'));
-                    if (bodyBranding && elType == 'image') {
+                    if (bodyBranding && elType == 'image' && !personalizedElementKeys.contains(String.valueOf(el.get('key')))) {
+                        // Drop a NON-personalized body image that duplicates the banner. NEVER drop a
+                        // personalized one: its block anchors the PP swap, and removing it orphaned the
+                        // target -> "unknown element key" rollback (the banner keys are now also excluded
+                        // from the swap pool upstream, so this is a belt-and-suspenders guard).
                         String elContentKey = String.valueOf(el.get('contentKey'));
                         if ((String.isNotBlank(req.logoContentKeyOverride) && elContentKey == req.logoContentKeyOverride)
                             || (String.isNotBlank(req.headerContentKeyOverride) && elContentKey == req.headerContentKeyOverride)) {
@@ -1532,9 +1830,15 @@ public with sharing class BuildDynamicEmailAction {
                     + 'an object {"contentKey":"...","altText":"...","widthPercent":N} for each decision, not plain text.');
             }
             Map<String, Object> imageSpec = (Map<String, Object>) decisionValue;
+            // Off-CMS (Contentful) swap variant: a direct url, no contentKey -> url-mode block.
+            String imgUrl = String.valueOf(imageSpec.get('url'));
+            if (String.isNotBlank(imgUrl) && imgUrl != 'null') {
+                return imageAttributes(null, imgUrl, sanitizeText(String.valueOf(imageSpec.get('altText'))),
+                    asDecimal(imageSpec.get('widthPercent'), 100.0), paddingMap(8.0, 16.0, 24.0, 24.0));
+            }
             String contentKey = String.valueOf(imageSpec.get('contentKey'));
             if (String.isBlank(contentKey) || contentKey == 'null') {
-                throw new WireException('Target block is lightning/image -- textByDecision value is missing "contentKey".');
+                throw new WireException('Target block is lightning/image -- textByDecision value is missing "contentKey" (or "url").');
             }
             return imageAttributes(contentKey, sanitizeText(String.valueOf(imageSpec.get('altText'))),
                 asDecimal(imageSpec.get('widthPercent'), 100.0), paddingMap(8.0, 16.0, 24.0, 24.0));
@@ -1585,6 +1889,14 @@ public with sharing class BuildDynamicEmailAction {
         try {
             wirePersonalizationsInner(ppSpecs, sess, auraContextJson, expressionsByKey, blockIds,
                 dataSpace, graphName, managedContentId, allOperations, allVariants, allVariantIdEntries, createdPpNames, topo);
+
+            // The GET'd contentBody returns every lightning/html block's rawHtml ALREADY HTML-encoded
+            // (the create POST encoded it once). Re-PUTting it as-is makes the PUT encode it a SECOND
+            // time -> a double-encoded base image (&amp;lt;img) that renders as literal text, while the
+            // freshly-built variants (added below, still plain) encode correctly once. Decode one entity
+            // layer on the fetched body's html blocks FIRST, so the PUT re-encodes each exactly once.
+            // Must run BEFORE adding allVariants (those are plain and must NOT be decoded).
+            decodeHtmlBlocksOnce(contentBody.get('sfdc_cms:block'));
 
             contentBody.put('lightning:dataProviders', new List<Object>{ dataGraphDataProvider(graphName, dataSpace) });
             contentBody.put('sfdc_cms:operations', allOperations);
@@ -1747,6 +2059,13 @@ public with sharing class BuildDynamicEmailAction {
                 }
                 String blockDefinition = target.get('blockDefinition') != null
                     ? String.valueOf(target.get('blockDefinition')) : 'lightning/paragraph';
+                // EFFECTIVE block definition: when Update supplied the live block's real type (via
+                // liveBlockDefByElementKey), it OVERRIDES the plan's declared type, so a swap variant
+                // always matches the block it replaces. Chiefly: a URL image the build path rendered as
+                // lightning/html is planned as lightning/image, but the variant must be html to render.
+                // Empty on fresh build -> plan's blockDefinition stands.
+                String liveDef = liveBlockDefByElementKey.get(elementKey);
+                if (String.isNotBlank(liveDef)) { blockDefinition = liveDef; }
                 Map<String, Object> textByDecision = (Map<String, Object>) target.get('textByDecision');
                 // SUBJECT/PREHEADER component: personalizes email metadata, not a block, so there is no
                 // block id to resolve, the variant body is {subjectLine, preheader}, and the operation
@@ -1784,6 +2103,29 @@ public with sharing class BuildDynamicEmailAction {
                         variantBody = new Map<String, Object>();
                         if (sp.get('subjectLine') != null) { variantBody.put('subjectLine', sp.get('subjectLine')); }
                         if (sp.get('preheader') != null) { variantBody.put('preheader', sp.get('preheader')); }
+                    } else if ((textByDecision.get(rawDecisionName) instanceof Map<String, Object>)
+                            && String.isNotBlank(String.valueOf(((Map<String, Object>) textByDecision.get(rawDecisionName)).get('url')))
+                            && (blockDefinition == 'lightning/html'
+                                || (allowHtmlImageVariants && blockDefinition == 'lightning/image'))) {
+                        // URL-based image swap variant -> emit a lightning/html <img> block, matching the
+                        // html base block the build path made for this URL image. Two paths reach here:
+                        //   - FRESH BUILD: allowHtmlImageVariants on + plan blockDefinition lightning/image.
+                        //   - UPDATE of an html-image slot: liveBlockDefByElementKey set blockDefinition to
+                        //     lightning/html, so the variant matches the existing html base (a url-mode
+                        //     lightning/image variant on an html base renders nothing). The flag is off on
+                        //     update; the lightning/html branch is what carries this case.
+                        // A url-image swap targeting a genuine lightning/image base block (the CMS url-mode
+                        // image path) still falls to the else below -> url-mode lightning/image variant.
+                        // Proven live: PP swap on an html block wires via create-PP + encoded-rawHtml. See
+                        // [[feedback_dc_agent_html_block_pp_swap_supported]].
+                        Map<String, Object> img = (Map<String, Object>) textByDecision.get(rawDecisionName);
+                        Map<String, Object> htmlBlk = htmlImageBlock(targetBlockId,
+                            String.valueOf(img.get('url')),
+                            sanitizeText(String.valueOf(img.get('altText'))),
+                            asDecimal(img.get('widthPercent'), 100.0));
+                        variantBody = new Map<String, Object>{
+                            'sfdc_cms:block' => new Map<String, Object>{ 'children' => new List<Object>{ htmlBlk } }
+                        };
                     } else {
                         variantBody = new Map<String, Object>{
                             'sfdc_cms:block' => new Map<String, Object>{
@@ -1846,6 +2188,44 @@ public with sharing class BuildDynamicEmailAction {
         } catch (Exception ignored) {
             return false;
         }
+    }
+
+    // Decode a GET'd body's lightning/html rawHtml back to PLAIN HTML, in place, before a re-PUT.
+    // The create POST stored each html block single-encoded; a GET returns it encoded; re-PUTting that
+    // encoded string makes the PUT encode it AGAIN -> double-encoded base image (&amp;lt;img) that
+    // renders as literal text. Decoding to plain here means the PUT re-encodes exactly once (single),
+    // matching the correctly-encoded fresh variants. Runs on the base block tree ONLY, BEFORE the plain
+    // fresh variants are added (those must not be touched). Loops until stable to peel any pre-existing
+    // multi-encoding. See [[feedback_dc_agent_html_block_pp_swap_supported]].
+    private static void decodeHtmlBlocksOnce(Object node) {
+        if (node instanceof Map<String, Object>) {
+            Map<String, Object> m = (Map<String, Object>) node;
+            if ('lightning/html'.equals(m.get('definition'))) {
+                Map<String, Object> attrs = (Map<String, Object>) m.get('attributes');
+                if (attrs != null && attrs.get('rawHtml') instanceof String) {
+                    String s = (String) attrs.get('rawHtml');
+                    String prev = null;
+                    // Peel entity layers until the string contains a literal '<' (fully decoded) or
+                    // stops changing -- handles single OR already-double-encoded input robustly.
+                    while (s != prev && s.indexOf('<') < 0) { prev = s; s = decodeOneEntityLayer(s); }
+                    attrs.put('rawHtml', s);
+                }
+            }
+            for (Object v : m.values()) { decodeHtmlBlocksOnce(v); }
+        } else if (node instanceof List<Object>) {
+            for (Object v : (List<Object>) node) { decodeHtmlBlocksOnce(v); }
+        }
+    }
+
+    private static String decodeOneEntityLayer(String s) {
+        if (String.isBlank(s)) { return s; }
+        return s
+            .replace('&lt;', '<')
+            .replace('&gt;', '>')
+            .replace('&quot;', '"')
+            .replace('&#61;', '=')
+            .replace('&#39;', '\'')
+            .replace('&amp;', '&');   // LAST so a double-encoded &amp;lt; peels to &lt; this pass
     }
 
     // LLM-authored text can't be trusted to emit plain characters instead of HTML entities
@@ -1972,6 +2352,12 @@ public with sharing class BuildDynamicEmailAction {
     }
     public static void sharedValidateImageContentKeys(String accessToken, Set<String> keys) {
         validateImageContentKeys(accessToken, keys);
+    }
+    // Shared workspace guard for the Update path: drop off-workspace CMS assets from the catalog so an
+    // update's swap-image resolution can't reference an image that lives in another workspace (same
+    // 403-on-PUT failure the build path guards against). See [[project_dc_agent_workspace_scoped_brands]].
+    public static String sharedFilterAssetsToWorkspace(String assetsJson, String targetSpaceId, List<String> droppedNames) {
+        return filterAssetsToWorkspace(assetsJson, targetSpaceId, droppedNames);
     }
     public static void sharedWirePersonalizationsInner(List<Object> ppSpecs, AuraSessionMinter.Session sess,
             String auraContextJson, Map<String, Object> expressionsByKey, Map<String, Object> blockIds,

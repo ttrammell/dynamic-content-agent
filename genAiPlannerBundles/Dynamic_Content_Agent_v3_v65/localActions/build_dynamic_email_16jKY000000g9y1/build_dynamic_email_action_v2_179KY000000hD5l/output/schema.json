@@ -1,0 +1,78 @@
+{
+  "unevaluatedProperties" : false,
+  "properties" : {
+    "blockIdsJson" : {
+      "title" : "Block Ids Json",
+      "description" : "Block Ids Json",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "contentKey" : {
+      "title" : "Content Key",
+      "description" : "Content Key",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "errorMessage" : {
+      "title" : "Error Message",
+      "description" : "Error Message",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "managedContentId" : {
+      "title" : "Managed Content Id",
+      "description" : "Managed Content Id",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "personalized" : {
+      "title" : "Personalized",
+      "description" : "Personalized",
+      "lightning:type" : "lightning__booleanType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "ppName" : {
+      "title" : "Pp Name",
+      "description" : "Pp Name",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "rolledBack" : {
+      "title" : "Rolled Back",
+      "description" : "True if personalization failed and the created email was successfully deleted. If false while success is also false, the email may still exist and needs manual cleanup.",
+      "lightning:type" : "lightning__booleanType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "success" : {
+      "title" : "Success",
+      "description" : "Whether the whole call succeeded. If personalization was requested and failed, this is false even though the email was briefly created -- it's automatically rolled back (see rolledBack).",
+      "lightning:type" : "lightning__booleanType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "variantIdsJson" : {
+      "title" : "Variant Ids Json",
+      "description" : "Variant Ids Json",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    }
+  },
+  "lightning:type" : "lightning__objectType"
+}

@@ -1,0 +1,234 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<GenAiPlannerBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+    <description>Builds CMS emails from content elements and can wire in dynamic-content
+personalization. Hand-authored Agent Script port of the legacy-builder
+AuraPoc_Email_Builder bot -- reuses the same Apex actions and prompt
+template, but replaces the old natural-language-only confirmation
+instruction with real deterministic gates: the build action is not
+available to the LLM until the user has explicitly approved the
+drafted plan, branding has actually been resolved, and the plan has
+actually passed structural validation. The drafting pipeline itself
+(structure -&gt; copy -&gt; assembly -&gt; validation) also runs
+deterministically via after_reasoning, rather than depending on the
+LLM to remember to call each step.
+
+Authored by Toby Trammell.</description>
+    <localTopicLinks>
+        <genAiPluginName>agent_router_16jKY000000g9xw</genAiPluginName>
+    </localTopicLinks>
+    <localTopicLinks>
+        <genAiPluginName>build_dynamic_email_16jKY000000g9xw</genAiPluginName>
+    </localTopicLinks>
+    <localTopicLinks>
+        <genAiPluginName>email_context_16jKY000000g9xw</genAiPluginName>
+    </localTopicLinks>
+    <localTopics>
+        <fullName>build_dynamic_email_16jKY000000g9xw</fullName>
+        <canEscalate>false</canEscalate>
+        <description>Drafts a content plan for an email, optionally personalized, gets the
+user&apos;s explicit approval of that exact plan, and only then builds it
+in CMS. Never builds without approval -- the build action is not even
+available to call until approval is recorded.</description>
+        <developerName>build_dynamic_email_16jKY000000g9xw</developerName>
+        <genAiPluginInstructions>
+            <description>You help the user build marketing emails in Salesforce CMS, optionally
+personalized with Data Cloud dynamic content. You never build or
+personalize an email without first showing the user a plain-language
+summary of exactly what you are about to build and getting their
+explicit approval.</description>
+            <developerName>instruction0_179KY000000hD5f</developerName>
+            <language>en_US</language>
+            <masterLabel>instruction0_179KY000000hD5f</masterLabel>
+            <sortOrder>1</sortOrder>
+        </genAiPluginInstructions>
+        <language>en_US</language>
+        <localActionLinks>
+            <functionName>plan_email_structure_action_179KY000000hD5f</functionName>
+        </localActionLinks>
+        <localActionLinks>
+            <functionName>hydrate_brand_records_action_179KY000000hD5f</functionName>
+        </localActionLinks>
+        <localActionLinks>
+            <functionName>assemble_content_plan_action_v2_179KY000000hD5f</functionName>
+        </localActionLinks>
+        <localActionLinks>
+            <functionName>build_dynamic_email_action_v2_179KY000000hD5f</functionName>
+        </localActionLinks>
+        <localActionLinks>
+            <functionName>write_email_copy_action_179KY000000hD5f</functionName>
+        </localActionLinks>
+        <localActionLinks>
+            <functionName>validate_content_plan_action_v2_179KY000000hD5f</functionName>
+        </localActionLinks>
+        <localActionLinks>
+            <functionName>hydrate_data_graph_action_179KY000000hD5f</functionName>
+        </localActionLinks>
+        <localActions>
+            <fullName>validate_content_plan_action_v2_179KY000000hD5f</fullName>
+            <description>Checks a drafted plan&apos;s elementsJson/personalizationsJson for structural problems -- missing textByDecision entries, unknown element keys, invalid decision criteria, too many PersonalizationPoints or decisions -- before the user is ever asked to approve it. Creates nothing, makes no changes.</description>
+            <developerName>validate_content_plan_action_v2_179KY000000hD5f</developerName>
+            <invocationTarget>ValidateContentPlanAction</invocationTarget>
+            <invocationTargetType>apex</invocationTargetType>
+            <isConfirmationRequired>false</isConfirmationRequired>
+            <isIncludeInProgressIndicator>false</isIncludeInProgressIndicator>
+            <localDeveloperName>validate_content_plan_action_v2</localDeveloperName>
+            <masterLabel>Validate Content Plan Action V 2</masterLabel>
+        </localActions>
+        <localActions>
+            <fullName>assemble_content_plan_action_v2_179KY000000hD5f</fullName>
+            <description>Deterministically merges a structure plan and its written copy into the elementsJson/personalizationsJson shape Build Dynamic Email expects -- one PersonalizationPoint per independent personalization axis. Makes no callouts and creates nothing.</description>
+            <developerName>assemble_content_plan_action_v2_179KY000000hD5f</developerName>
+            <invocationTarget>AssembleContentPlanAction</invocationTarget>
+            <invocationTargetType>apex</invocationTargetType>
+            <isConfirmationRequired>false</isConfirmationRequired>
+            <isIncludeInProgressIndicator>false</isIncludeInProgressIndicator>
+            <localDeveloperName>assemble_content_plan_action_v2</localDeveloperName>
+            <masterLabel>Assemble Content Plan Action V 2</masterLabel>
+        </localActions>
+        <localActions>
+            <fullName>plan_email_structure_action_179KY000000hD5f</fullName>
+            <description>Decides email structure (content slots and personalization needs) from a plain-language request, without writing any final copy. Creates nothing, makes no changes.</description>
+            <developerName>plan_email_structure_action_179KY000000hD5f</developerName>
+            <invocationTarget>AuraPoc_PlanEmailStructureV2</invocationTarget>
+            <invocationTargetType>generatePromptResponse</invocationTargetType>
+            <isConfirmationRequired>false</isConfirmationRequired>
+            <isIncludeInProgressIndicator>false</isIncludeInProgressIndicator>
+            <localDeveloperName>plan_email_structure_action</localDeveloperName>
+            <masterLabel>Plan Email Structure Action</masterLabel>
+        </localActions>
+        <localActions>
+            <fullName>hydrate_brand_records_action_179KY000000hD5f</fullName>
+            <description>Deterministic session-start fetch of every brand&apos;s name/contentKey (no voice -- too expensive org-wide). Called once from before_reasoning, never exposed as an LLM choice.</description>
+            <developerName>hydrate_brand_records_action_179KY000000hD5f</developerName>
+            <invocationTarget>FindBrandRecordAction</invocationTarget>
+            <invocationTargetType>apex</invocationTargetType>
+            <isConfirmationRequired>false</isConfirmationRequired>
+            <isIncludeInProgressIndicator>false</isIncludeInProgressIndicator>
+            <localDeveloperName>hydrate_brand_records_action</localDeveloperName>
+            <masterLabel>Hydrate Brand Records Action</masterLabel>
+        </localActions>
+        <localActions>
+            <fullName>hydrate_data_graph_action_179KY000000hD5f</fullName>
+            <description>Deterministic, session-start-only fetch of this org&apos;s Data Cloud data graph fields. Never exposed to the LLM as a choice -- called once from before_reasoning, not on demand.</description>
+            <developerName>hydrate_data_graph_action_179KY000000hD5f</developerName>
+            <invocationTarget>DataGraphDetailsAction</invocationTarget>
+            <invocationTargetType>apex</invocationTargetType>
+            <isConfirmationRequired>false</isConfirmationRequired>
+            <isIncludeInProgressIndicator>false</isIncludeInProgressIndicator>
+            <localDeveloperName>hydrate_data_graph_action</localDeveloperName>
+            <masterLabel>Hydrate Data Graph Action</masterLabel>
+        </localActions>
+        <localActions>
+            <fullName>build_dynamic_email_action_v2_179KY000000hD5f</fullName>
+            <description>Creates a CMS email from content elements, and optionally wires in dynamic content personalization, in one atomic call. If personalization fails, the created email is deleted rather than left half-built.</description>
+            <developerName>build_dynamic_email_action_v2_179KY000000hD5f</developerName>
+            <invocationTarget>BuildDynamicEmailAction</invocationTarget>
+            <invocationTargetType>apex</invocationTargetType>
+            <isConfirmationRequired>true</isConfirmationRequired>
+            <isIncludeInProgressIndicator>false</isIncludeInProgressIndicator>
+            <localDeveloperName>build_dynamic_email_action_v2</localDeveloperName>
+            <masterLabel>Dynamic Content Email</masterLabel>
+        </localActions>
+        <localActions>
+            <fullName>write_email_copy_action_179KY000000hD5f</fullName>
+            <description>Writes final creative copy (title, subject line, preheader, and text for every content slot) for an already-decided structure plan from Plan Email Structure. Creates nothing, makes no changes.</description>
+            <developerName>write_email_copy_action_179KY000000hD5f</developerName>
+            <invocationTarget>AuraPoc_WriteEmailCopy</invocationTarget>
+            <invocationTargetType>generatePromptResponse</invocationTargetType>
+            <isConfirmationRequired>false</isConfirmationRequired>
+            <isIncludeInProgressIndicator>false</isIncludeInProgressIndicator>
+            <localDeveloperName>write_email_copy_action</localDeveloperName>
+            <masterLabel>Write Email Copy Action</masterLabel>
+        </localActions>
+        <localDeveloperName>build_dynamic_email</localDeveloperName>
+        <masterLabel>Build Dynamic Email</masterLabel>
+        <pluginType>Topic</pluginType>
+    </localTopics>
+    <localTopics>
+        <fullName>agent_router_16jKY000000g9xw</fullName>
+        <canEscalate>false</canEscalate>
+        <description>Welcome the user and start the dynamic email builder.</description>
+        <developerName>agent_router_16jKY000000g9xw</developerName>
+        <genAiPluginInstructions>
+            <description>You help the user build marketing emails in Salesforce CMS, optionally
+personalized with Data Cloud dynamic content. You never build or
+personalize an email without first showing the user a plain-language
+summary of exactly what you are about to build and getting their
+explicit approval.</description>
+            <developerName>instruction0_179KY000000hD5g</developerName>
+            <language>en_US</language>
+            <masterLabel>instruction0_179KY000000hD5g</masterLabel>
+            <sortOrder>1</sortOrder>
+        </genAiPluginInstructions>
+        <language>en_US</language>
+        <localDeveloperName>agent_router</localDeveloperName>
+        <masterLabel>Agent Router</masterLabel>
+        <pluginType>Topic</pluginType>
+    </localTopics>
+    <localTopics>
+        <fullName>email_context_16jKY000000g9xw</fullName>
+        <canEscalate>false</canEscalate>
+        <description>Looks up brand assets and confirmed data-graph fields on request.
+Never creates, changes, or personalizes anything.</description>
+        <developerName>email_context_16jKY000000g9xw</developerName>
+        <genAiPluginInstructions>
+            <description>You help the user build marketing emails in Salesforce CMS, optionally
+personalized with Data Cloud dynamic content. You never build or
+personalize an email without first showing the user a plain-language
+summary of exactly what you are about to build and getting their
+explicit approval.</description>
+            <developerName>instruction0_179KY000000hD5h</developerName>
+            <language>en_US</language>
+            <masterLabel>instruction0_179KY000000hD5h</masterLabel>
+            <sortOrder>1</sortOrder>
+        </genAiPluginInstructions>
+        <language>en_US</language>
+        <localActionLinks>
+            <functionName>find_brand_assets_action_179KY000000hD5h</functionName>
+        </localActionLinks>
+        <localActionLinks>
+            <functionName>data_graph_details_action_179KY000000hD5h</functionName>
+        </localActionLinks>
+        <localActionLinks>
+            <functionName>find_brand_record_action_179KY000000hD5h</functionName>
+        </localActionLinks>
+        <localActions>
+            <fullName>find_brand_assets_action_179KY000000hD5h</fullName>
+            <description>Search CMS image content by name/URL slug (e.g. &quot;logo&quot;, &quot;header&quot;) and return each match&apos;s contentKey and managedContentId, for use as an image element&apos;s contentKey. Use this instead of guessing or asking the user for a raw content key.</description>
+            <developerName>find_brand_assets_action_179KY000000hD5h</developerName>
+            <invocationTarget>FindBrandAssetsAction</invocationTarget>
+            <invocationTargetType>apex</invocationTargetType>
+            <isConfirmationRequired>false</isConfirmationRequired>
+            <isIncludeInProgressIndicator>false</isIncludeInProgressIndicator>
+            <localDeveloperName>find_brand_assets_action</localDeveloperName>
+            <masterLabel>Find Brand Assets Action</masterLabel>
+        </localActions>
+        <localActions>
+            <fullName>find_brand_record_action_179KY000000hD5h</fullName>
+            <description>Search CMS brand records (colorScheme/typography/button styling) by name and return each match&apos;s contentKey. Distinct from Find Brand Assets, which only finds logo/header pictures -- without this, an email still renders with generic default colors/fonts even if the right logo/header images are used. Omit searchTerm to list every brand record in the org.</description>
+            <developerName>find_brand_record_action_179KY000000hD5h</developerName>
+            <invocationTarget>FindBrandRecordAction</invocationTarget>
+            <invocationTargetType>apex</invocationTargetType>
+            <isConfirmationRequired>false</isConfirmationRequired>
+            <isIncludeInProgressIndicator>false</isIncludeInProgressIndicator>
+            <localDeveloperName>find_brand_record_action</localDeveloperName>
+            <masterLabel>Find Brand Record Action</masterLabel>
+        </localActions>
+        <localActions>
+            <fullName>data_graph_details_action_179KY000000hD5h</fullName>
+            <description>Fetch a Data Cloud data graph definition (DMOs and fields) so you know what personalization criteria are actually available before wiring dynamic content. Auto-detects the org&apos;s data graph if none is specified.</description>
+            <developerName>data_graph_details_action_179KY000000hD5h</developerName>
+            <invocationTarget>DataGraphDetailsAction</invocationTarget>
+            <invocationTargetType>apex</invocationTargetType>
+            <isConfirmationRequired>false</isConfirmationRequired>
+            <isIncludeInProgressIndicator>false</isIncludeInProgressIndicator>
+            <localDeveloperName>data_graph_details_action</localDeveloperName>
+            <masterLabel>Data Graph Details Action</masterLabel>
+        </localActions>
+        <localDeveloperName>email_context</localDeveloperName>
+        <masterLabel>Email Context</masterLabel>
+        <pluginType>Topic</pluginType>
+    </localTopics>
+    <masterLabel>Dynamic Content Agent</masterLabel>
+    <plannerType>Atlas__ConcurrentMultiAgentOrchestration</plannerType>
+</GenAiPlannerBundle>

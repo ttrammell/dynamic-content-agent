@@ -1,0 +1,21 @@
+{
+  "required" : [ "searchTerm" ],
+  "unevaluatedProperties" : false,
+  "properties" : {
+    "maxResults" : {
+      "title" : "Max Results",
+      "description" : "Maximum number of matches to return; leave blank to use the org default (25) rather than passing a smaller number yourself.",
+      "lightning:type" : "lightning__integerType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "searchTerm" : {
+      "title" : "Search Term",
+      "description" : "Text to match against CMS image content names, e.g. \"logo\", \"header\", \"default-email-template\" (hyphens, matching the real naming convention -- spaces won't match).",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    }
+  },
+  "lightning:type" : "lightning__objectType"
+}

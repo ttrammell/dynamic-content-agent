@@ -1,0 +1,14 @@
+{
+  "required" : [ ],
+  "unevaluatedProperties" : false,
+  "properties" : {
+    "graphApiName" : {
+      "title" : "Graph Api Name",
+      "description" : "API name of a specific Data Cloud data graph to look up. Leave blank in almost all cases -- the action auto-detects the org's data graph. Only pass a name if the user has told you this org has multiple graphs and specified which one.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    }
+  },
+  "lightning:type" : "lightning__objectType"
+}

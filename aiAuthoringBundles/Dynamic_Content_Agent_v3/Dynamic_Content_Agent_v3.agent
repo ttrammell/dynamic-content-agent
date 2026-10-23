@@ -247,12 +247,12 @@ subagent email_context:
             outputs:
                 success: boolean
                 assetsJson: string
-                    description: "JSON array of {name, urlName, contentKey, managedContentId, workspaceId} for each matching image. workspaceId is the CMS workspace this asset lives in -- usable directly as contentSpaceOrFolderId to build the email in that same workspace, without a separate workspace lookup."
+                    description: "JSON array of {name, urlName, contentKey, managedContentId, workspaceId} per matching image. workspaceId is the asset's CMS workspace -- usable directly as contentSpaceOrFolderId to build the email in that same workspace."
                 errorMessage: string
             target: "apex://FindBrandAssetsAction"
 
         find_brand_record_action:
-            description: "Search CMS brand records (colorScheme/typography/button styling) by name and return each match's contentKey. Distinct from Find Brand Assets, which only finds logo/header pictures -- without this, an email still renders with generic default colors/fonts even if the right logo/header images are used. Omit searchTerm to list every brand record in the org."
+            description: "Search CMS brand records (colorScheme/typography/button styling) by name; returns each match's contentKey. Unlike Find Brand Assets (logo/header pictures only), this is what makes an email render in the brand's colors/fonts rather than generic defaults. Omit searchTerm to list every brand record."
             inputs:
                 searchTerm: string
                     description: "Text to match against CMS brand record names, e.g. \"AMD\". Omit to list every brand record in the org -- useful to check whether a specific brand actually has a brand record at all, distinct from just having logo/header images."
@@ -379,7 +379,7 @@ subagent plan:
             target: "apex://FindBrandAssetsAction"
 
         get_asset_catalog_action:
-            description: "Returns the image-asset catalog for this build: the named brand's assets UNIONED with the org's stock image library, as one assetsJson. Used by the deterministic brand lookup in after_reasoning to feed base_brand_context -- so image elements (base AND dynamic-content variants) resolve by assetName across both brand and stock images. Not an LLM choice."
+            description: "Returns the image-asset catalog for this build -- the named brand's assets UNIONED with the org's stock images, as one assetsJson. Feeds base_brand_context (deterministic, not an LLM choice) so image elements (base AND DC variants) resolve by assetName across brand and stock images."
             inputs:
                 brandName: string
                     description: "The named brand (blank if none); its assets are unioned with stock."
@@ -439,7 +439,7 @@ subagent plan:
                     is_required: True
                 assetsJson: string
                     label: "Brand Assets"
-                    description: "The org's brand-asset catalog (the same list Find Brand Assets produced, held in base_brand_context). Bound to base_brand_context -- not LLM-filled. Build resolves each image element's real contentKey from its assetRole/assetName against this list, so the model never transcribes an MC-key."
+                    description: "The org's brand-asset catalog, bound to base_brand_context (not LLM-filled). Build resolves each image element's real contentKey from its assetRole/assetName against this list, so the model never transcribes an MC-key."
                 includeBranding: boolean
                     description: "When true (default), wraps the elements with a logo/header banner and address/unsubscribe footer."
                 logoContentKeyOverride: string
@@ -487,7 +487,7 @@ subagent plan:
 
         read_dynamic_email_action:
             label: "Read Dynamic Content Email"
-            description: "Reads an EXISTING CMS email by its content key and reports its real content: whether it has dynamic content, how many PersonalizationPoints, and its heading/paragraph/image blocks (with which are personalized). Use this to answer ANY question about an existing email, and BEFORE updating one -- never guess or describe an email's contents from its name alone. Read-only; creates nothing."
+            description: "Reads an EXISTING CMS email by content key: whether it has dynamic content, how many PersonalizationPoints, and its heading/paragraph/image blocks (which are personalized). Use to answer ANY question about an existing email and BEFORE updating one -- never guess its contents from its name. Read-only; creates nothing."
             inputs:
                 contentKey: string
                     label: "Email Content Key"
@@ -509,7 +509,7 @@ subagent plan:
 
         update_dynamic_email_action:
             label: "Update Dynamic Content Email"
-            description: "Adds dynamic content personalization to an EXISTING CMS email, merging the new PersonalizationPoints/decisions/variants into whatever is already there. Targets existing blocks by their content (heading/paragraph text, or image contentKey). Preserves the email's copy, layout, and any existing dynamic content -- only operations/variants are extended. Use this when the user wants to add or change dynamic content on an email that is ALREADY built (identified by its content key), NOT to create a new email."
+            description: "Adds dynamic content to an EXISTING CMS email (by content key), merging new PersonalizationPoints/decisions/variants into what's there; targets blocks by content (heading/paragraph text or image contentKey). Preserves copy/layout/existing DC -- only operations/variants are extended. Use for an ALREADY-built email, NOT to create a new one."
             require_user_confirmation: True
             inputs:
                 contentKey: string

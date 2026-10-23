@@ -1,0 +1,112 @@
+{
+  "required" : [ "contentSpaceOrFolderId", "title", "urlName", "subjectLine", "preheader", "elementsJson" ],
+  "unevaluatedProperties" : false,
+  "properties" : {
+    "brandContentKeyOverride" : {
+      "title" : "Brand Content Key Override",
+      "description" : "contentKey of a specific brand's own CMS brand record (from Find Brand Record, NOT Find Brand Assets) to attach that brand's colorScheme/typography/button styling. Only set this if the user asked for a specific brand -- never fabricate a contentKey.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "contentSpaceOrFolderId" : {
+      "title" : "CMS Workspace",
+      "description" : "Id of the CMS workspace or folder to create the email in. If the user named a specific brand, use the workspaceId returned by Find Brand Assets or Find Brand Record for that brand -- don't ask the user for a raw workspace id when it's already available that way. Otherwise confirm it with the user if unsure.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "dataSpaceName" : {
+      "title" : "Data Space Name",
+      "description" : "Data Cloud DATA SPACE (a tenant/partition name, almost always literally 'default') -- NOT the data graph name. Leave this blank in almost all cases. Never put a data graph's name here (e.g. 'Real_Time_Data_Graph' or 'HP_Default') -- that belongs in profileDataGraphName below, a completely different field.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "elementsJson" : {
+      "title" : "Elements Json",
+      "description" : "JSON array of content elements, e.g. [{\"key\":\"greeting_heading\",\"type\":\"heading\",\"text\":\"Welcome\"}]. Supported types: heading, paragraph, image, button. Each element's \"key\" is chosen by you and referenced later in targetsJson -- there are no CMS block ids to track. For genuine per-recipient personalization (not a segment swap), write a plain placeholder directly in heading/paragraph text: {{FirstName}}, {{LastName}}, {{AccountName}}, or {{Persona}} -- optionally with a fallback, e.g. {{FirstName|there}}. These are the ONLY supported names; the actual data-graph lookup is handled deterministically -- never write Salesforce's {!$Expression.*} syntax yourself, and never invent an unsupported placeholder name. Never use a placeholder in subjectLine or preheader -- it will fail.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "headerContentKeyOverride" : {
+      "title" : "Header Content Key Override",
+      "description" : "contentKey of the header image to use in the banner -- either a specific brand's (from Find Brand Assets) or the org's own default-email-template-header asset, per checklist step 2. Never fabricate a contentKey.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "includeBranding" : {
+      "title" : "Include Branding",
+      "description" : "When true (default), wraps the elements with a logo/header banner and address/unsubscribe footer. Uses the org default logo/header unless logoContentKeyOverride/headerContentKeyOverride are given.",
+      "lightning:type" : "lightning__booleanType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "logoContentKeyOverride" : {
+      "title" : "Logo Content Key Override",
+      "description" : "contentKey of the logo to use in the banner -- either a specific brand's (from Find Brand Assets) or the org's own default-email-template-logo asset, per checklist step 2. Never fabricate a contentKey.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "personalizationsJson" : {
+      "title" : "Personalizations Json",
+      "description" : "JSON array of PersonalizationPoint specs, ONE PER INDEPENDENT AXIS -- e.g. [{\"ppName\":\"Industry_Personalization\",\"ppLabel\":\"Industry Personalization\",\"decisionsJson\":\"[{\\\"name\\\":\\\"Has_First_Name_v1\\\",\\\"label\\\":\\\"Has First Name\\\",\\\"criteriaFieldApiName\\\":\\\"ssot__FirstName__c\\\"}]\",\"targetsJson\":\"[{\\\"elementKey\\\":\\\"greeting_heading\\\",\\\"textByDecision\\\":{\\\"Has_First_Name_v1\\\":\\\"Hi there!\\\"}}]\"}]. Never combine unrelated personalization axes (e.g. industry AND has-first-name) into one entry's decisionsJson -- Salesforce evaluates decisions within one PersonalizationPoint as mutually-exclusive alternatives, not independently-combinable facts, so each independent axis needs its own entry. At most 3 entries, at most 10 decisions per entry. Omit entirely for a plain, unpersonalized email.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "preheader" : {
+      "title" : "Preheader",
+      "description" : "Email preheader/preview text. Required by the CMS email content type.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "profileDataGraphName" : {
+      "title" : "Data Graph",
+      "description" : "The DATA GRAPH the decisions evaluate against -- this is where the graph name the user confirmed in checklist step 1 (e.g. 'Real_Time_Data_Graph') goes, never dataSpaceName above. Leave blank in almost all cases -- auto-detected from the org. Only pass a name if the user has told you this org has multiple graphs and specified which one.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "subjectLine" : {
+      "title" : "Subject Line",
+      "description" : "Email subject line.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "suppressHeader" : {
+      "title" : "Suppress Header",
+      "description" : "Set true ONLY when checklist step 2 found no brand header AND no default-email-template-header asset either -- omits the header from the banner entirely instead of silently falling back to an unrelated org default. Leave false/omitted whenever any header contentKey is available.",
+      "lightning:type" : "lightning__booleanType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "suppressLogo" : {
+      "title" : "Suppress Logo",
+      "description" : "Set true ONLY when checklist step 2 found no brand logo AND no default-email-template-logo asset either -- omits the logo from the banner entirely instead of silently falling back to an unrelated org default. Leave false/omitted whenever any logo contentKey is available.",
+      "lightning:type" : "lightning__booleanType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "title" : {
+      "title" : "Title",
+      "description" : "Internal title of the email content item.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "urlName" : {
+      "title" : "Email URL Slug",
+      "description" : "Unique URL slug for the email content item.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    }
+  },
+  "lightning:type" : "lightning__objectType"
+}

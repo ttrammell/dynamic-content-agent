@@ -16,11 +16,9 @@
         <members>BuildDynamicEmailAction</members>
         <members>ConfirmBuildAction</members>
         <members>DataGraphDetailsAction</members>
-        <members>DataGraphTopology</members>
         <members>DcPreflightController</members>
         <members>ExpandUpdatePlanSlotsAction</members>
         <members>FillCopyAction</members>
-        <members>FillCopyActionTest</members>
         <members>FindBrandAssetsAction</members>
         <members>FindBrandRecordAction</members>
         <members>GetAssetCatalogAction</members>
@@ -48,8 +46,8 @@
         <name>ExternalClientApplication</name>
     </types>
     <types>
-        <members>dcAgentPreflight</members>
-        <name>LightningComponentBundle</name>
+        <members>AuraPoc_Config.Default</members>
+        <name>CustomMetadata</name>
     </types>
     <version>66.0</version>
 </Package>

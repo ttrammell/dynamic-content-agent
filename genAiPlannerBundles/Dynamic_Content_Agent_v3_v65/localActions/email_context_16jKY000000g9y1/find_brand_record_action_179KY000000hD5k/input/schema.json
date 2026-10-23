@@ -1,0 +1,21 @@
+{
+  "required" : [ ],
+  "unevaluatedProperties" : false,
+  "properties" : {
+    "maxResults" : {
+      "title" : "Max Results",
+      "description" : "Maximum number of matches to return; leave blank to use the org default (25) rather than passing a smaller number yourself.",
+      "lightning:type" : "lightning__integerType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "searchTerm" : {
+      "title" : "Search Term",
+      "description" : "Text to match against CMS brand record names, e.g. \"AMD\". Omit to list every brand record in the org -- useful to check whether a specific brand actually has a brand record at all, distinct from just having logo/header images.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    }
+  },
+  "lightning:type" : "lightning__objectType"
+}

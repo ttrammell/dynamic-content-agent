@@ -315,7 +315,10 @@ public with sharing class ReadDynamicEmailAction {
             gc.brandName = '';
             gc.includeStock = true;
             String aj = GetAssetCatalogAction.getAssetCatalog(new List<GetAssetCatalogAction.Request>{ gc })[0].assetsJson;
-            return GetAssetCatalogAction.swapEligibleKeys(aj).size();
+            // CMS (contentKey) + off-CMS url (Contentful) swap-eligible images -- same combined pool
+            // Build's auto-assign draws from, so the offer floor and the build agree on what counts.
+            return GetAssetCatalogAction.swapEligibleKeys(aj).size()
+                + GetAssetCatalogAction.swapEligibleUrls(aj).size();
         } catch (Exception e) {
             return 0;   // offer floor not met -> image slots simply not offered; no hard fail
         }

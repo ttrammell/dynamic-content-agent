@@ -1,0 +1,22 @@
+{
+  "unevaluatedProperties" : false,
+  "properties" : {
+    "promptResponse" : {
+      "title" : "Prompt Response",
+      "description" : "JSON: titleGoal/subjectLineGoal/preheaderGoal, slots[] (key/type/goal -- image slots also carry contentKey/altText/widthPercent, button slots also carry linkGoal), personalizations[] (name/label/fieldApiName/scope/matchType/value/values/appliesToSlots). Contains no final copy -- goals/descriptions only.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "generationId" : {
+      "title" : "Generation Id",
+      "description" : "Generation Id",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    }
+  },
+  "lightning:type" : "lightning__objectType"
+}

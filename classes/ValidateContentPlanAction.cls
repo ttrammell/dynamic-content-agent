@@ -116,10 +116,47 @@ public with sharing class ValidateContentPlanAction {
             gc.brandName = '';
             gc.includeStock = true;
             String aj = GetAssetCatalogAction.getAssetCatalog(new List<GetAssetCatalogAction.Request>{ gc })[0].assetsJson;
-            return GetAssetCatalogAction.swapEligibleKeys(aj).size();
+            // Count CMS (contentKey) AND off-CMS url (Contentful) swap-eligible images -- Build's
+            // auto-assign draws from the same combined pool, so all three must agree.
+            return GetAssetCatalogAction.swapEligibleKeys(aj).size()
+                + GetAssetCatalogAction.swapEligibleUrls(aj).size();
         } catch (Exception e) {
             return -1;   // unverifiable -> caller skips the check rather than false-flagging a valid plan
         }
+    }
+
+    // GUARD 1 (field-absence pre-approval): fetch the LIVE graph topology so a decision field that is
+    // absent from the graph is caught HERE (pre-approval) the same way Build catches it, instead of only
+    // failing at build with a rollback. Returns null on ANY failure (fail-soft -- skip, never block;
+    // mirrors countCatalogImages's -1 and DataGraphDetailsAction.fetchGraphBody's null contract). Called
+    // ONLY in the gap case (catalog not threaded + graph resolved), and memoized by the caller so it
+    // runs at most ONCE per request -- the common catalog-threaded path never reaches here, so the hot
+    // path stays callout-free.
+    private static DataGraphTopology fetchTopologyForValidation(String graphApiName) {
+        try {
+            String token = AuraPocTokenProvider.fetch();
+            return DataGraphTopology.parse(DataGraphDetailsAction.fetchGraphBody(token, graphApiName));
+        } catch (Exception ignore) {
+            return null;   // unverifiable -> caller skips the topo check rather than blocking a valid plan
+        }
+    }
+
+    // GUARD 2 (operator/dataType compatibility): fieldApiName -> dataType, read from the SAME catalog
+    // the existence check uses. Mirrors AssembleContentPlanAction.buildFieldDataTypeMap. Used only when
+    // a catalog is present; lets Validate flag a Number/Date field whose dataType did NOT thread onto
+    // the decision (so Build would silently emit a Text predicate and 400). Empty when no catalog.
+    private static Map<String, String> buildFieldDataTypeMap(String availableFieldsJson) {
+        Map<String, String> out = new Map<String, String>();
+        if (String.isBlank(availableFieldsJson)) { return out; }
+        try {
+            for (Object o : (List<Object>) JSON.deserializeUntyped(availableFieldsJson)) {
+                Map<String, Object> f = (Map<String, Object>) o;
+                String fn = String.valueOf(f.get('fieldApiName'));
+                Object dt = f.get('dataType');
+                if (String.isNotBlank(fn) && dt != null) { out.put(fn, String.valueOf(dt)); }
+            }
+        } catch (Exception ignore) { /* malformed catalog -> unverifiable, not fatal */ }
+        return out;
     }
 
     @InvocableMethod(label='Validate Content Plan' description='Checks a drafted content plan (elementsJson/personalizationsJson) for structural problems -- unfilled elements (empty text/url/contentKey), missing textByDecision entries, unknown element keys, invalid decision criteria, too many PersonalizationPoints or decisions, and image personalizations the org has too few images to support -- before asking the user to approve it. Makes no changes and creates nothing.')
@@ -218,6 +255,19 @@ public with sharing class ValidateContentPlanAction {
                     // doesn't false-reject a field whose real DMO differs from the planner's guess.
                     Set<String> availableFieldApis = buildAvailableFieldApiNameSet(req.availableFieldsJson);
 
+                    // GUARD 2 data: fieldApiName -> dataType from the catalog (empty when no catalog).
+                    Map<String, String> fieldDataTypes = buildFieldDataTypeMap(req.availableFieldsJson);
+
+                    // GUARD 1 gate: only when the catalog was NOT threaded AND a graph is resolved do we
+                    // fall back to a LIVE topology fetch to verify field existence. When the catalog IS
+                    // present (the common path) the existing field check below covers it with no callout,
+                    // so this stays false and the hot path is callout-free. `topo` is fetched lazily and
+                    // memoized so at most ONE graph callout happens per request.
+                    Boolean needTopoValidation = availableFields.isEmpty()
+                        && String.isNotBlank(req.resolvedGraphApiName);
+                    DataGraphTopology topo = null;
+                    Boolean topoFetchAttempted = false;
+
                     if (ppSpecs.size() > BuildDynamicEmailAction.MAX_PPS_PER_EMAIL) {
                         issues.add('Plan has ' + ppSpecs.size() + ' PersonalizationPoints, but at most '
                             + BuildDynamicEmailAction.MAX_PPS_PER_EMAIL + ' are supported per email.');
@@ -263,14 +313,47 @@ public with sharing class ValidateContentPlanAction {
                         for (Object specObj : decisionSpecs) {
                             Map<String, Object> spec = (Map<String, Object>) specObj;
                             decisionNames.add(String.valueOf(spec.get('name')));
+                            // Cheap criteria dry-run (topo=null): catches criteriaType/value/state-province
+                            // errors + GUARD 2's numeric-value guard. specCriteriaOk gates the topo dry-run
+                            // below so a criteriaType/value error isn't reported twice.
+                            Boolean specCriteriaOk = true;
                             try {
                                 BuildDynamicEmailAction.buildDecisionCriteria(spec);
                             } catch (Exception criteriaEx) {
+                                specCriteriaOk = false;
                                 issues.add('PersonalizationPoint "' + ppLabel + '" decision "' + spec.get('name') + '": ' + criteriaEx.getMessage());
                             }
+                            String objectApiName = String.valueOf(spec.get('criteriaObjectApiName'));
+                            String fieldApiName = String.valueOf(spec.get('criteriaFieldApiName'));
+
+                            // GUARD 3: date-field EQUALITY is not supported on the PersonalizationPoint
+                            // surface. The PP decision engine (PersonalizationDecisionController) routes a
+                            // date/DateOnly field's equality through a DateOperator enum that has no accepted
+                            // equality constant -- every spelling (`equal`, `is on`, `on`, ...) 400s with
+                            // "Invalid DateOperator ..." or "Failed to parse Criteria" (proven live on SIC2025,
+                            // Real_Time_Data_Graph, ssot__BirthDate__c; corroborated by support case 471897510,
+                            // an open GUS against the Personalization/Recommender team for the sibling
+                            // "Invalid NumberOperator IS_TRUE"). Date PRESENCE (has_value) works and is allowed.
+                            // Catch it here, pre-approval, with an actionable message instead of a build 400.
+                            // See [[feedback_dc_agent_date_equality_unsupported_on_pp]].
+                            String critType = String.valueOf(spec.get('criteriaType'));
+                            if (critType == 'equals' || critType == 'in') {
+                                String dtForGuard = String.valueOf(spec.get('dataType'));
+                                if (String.isBlank(dtForGuard) && !availableFields.isEmpty()) {
+                                    dtForGuard = fieldDataTypes.get(fieldApiName);
+                                }
+                                if (String.isNotBlank(dtForGuard)
+                                        && BuildDynamicEmailAction.comparisonTypeFor(dtForGuard) == 'DateComparison') {
+                                    issues.add('PersonalizationPoint "' + ppLabel + '" decision "' + spec.get('name')
+                                        + '" matches a specific value on date field "' + fieldApiName + '" (data type '
+                                        + dtForGuard + '). Date-field equality is not supported for dynamic-content '
+                                        + 'personalization (a platform limitation of the Personalization engine). Use a '
+                                        + '"has value" presence check on this field, or personalize on a text or number '
+                                        + 'field instead.');
+                                }
+                            }
+
                             if (!availableFields.isEmpty()) {
-                                String objectApiName = String.valueOf(spec.get('criteriaObjectApiName'));
-                                String fieldApiName = String.valueOf(spec.get('criteriaFieldApiName'));
                                 // DMO-AGNOSTIC existence check (must match AssembleContentPlanAction's drop
                                 // logic, else Validate false-rejects what Assemble correctly kept). Build
                                 // derives the real owning DMO from the live graph topology, so the planner's
@@ -286,6 +369,36 @@ public with sharing class ValidateContentPlanAction {
                                         + '", which is not present on any object in the resolved data graph'
                                         + (String.isNotBlank(req.resolvedGraphApiName) ? ' "' + req.resolvedGraphApiName + '"' : '')
                                         + '. Only fields present in the graph can drive personalization.');
+                                }
+                                // GUARD 2: catalog says this field is Number/Date but the decision carries
+                                // no dataType -> Build would silently emit a Text predicate and 400 at build
+                                // ("Predicate type Text is not compatible..."). Flag it loudly, pre-approval.
+                                else if (String.isBlank(String.valueOf(spec.get('dataType')))) {
+                                    String catType = fieldDataTypes.get(fieldApiName);
+                                    if (String.isNotBlank(catType)) {
+                                        String cmp = BuildDynamicEmailAction.comparisonTypeFor(catType);
+                                        if (cmp == 'NumberComparison' || cmp == 'DateComparison') {
+                                            issues.add('PersonalizationPoint "' + ppLabel + '" decision "' + spec.get('name')
+                                                + '" personalizes field "' + fieldApiName + '" (data type ' + catType
+                                                + '), but its data type did not carry through to the decision -- it would '
+                                                + 'build as a Text match and be rejected. Re-run the plan so the field type resolves.');
+                                        }
+                                    }
+                                }
+                            } else if (needTopoValidation && specCriteriaOk) {
+                                // GUARD 1 (gap case only): no catalog was threaded, so verify field existence
+                                // against the LIVE topology the way Build does. Lazy one-time fetch, memoized.
+                                if (!topoFetchAttempted) {
+                                    topoFetchAttempted = true;
+                                    topo = fetchTopologyForValidation(req.resolvedGraphApiName);
+                                }
+                                if (topo != null) {
+                                    try {
+                                        BuildDynamicEmailAction.buildDecisionCriteria(spec, topo);
+                                    } catch (Exception topoEx) {
+                                        issues.add('PersonalizationPoint "' + ppLabel + '" decision "' + spec.get('name')
+                                            + '": ' + topoEx.getMessage());
+                                    }
                                 }
                             }
                         }

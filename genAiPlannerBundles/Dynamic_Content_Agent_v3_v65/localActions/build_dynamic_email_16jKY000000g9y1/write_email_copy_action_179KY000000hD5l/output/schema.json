@@ -1,0 +1,22 @@
+{
+  "unevaluatedProperties" : false,
+  "properties" : {
+    "promptResponse" : {
+      "title" : "Prompt Response",
+      "description" : "JSON: title/subjectLine/preheader, and copyBySlot keyed by each slot's key -- each entry is {default, url (buttons only), byPersonalization keyed by personalization name}.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "generationId" : {
+      "title" : "Generation Id",
+      "description" : "Generation Id",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    }
+  },
+  "lightning:type" : "lightning__objectType"
+}

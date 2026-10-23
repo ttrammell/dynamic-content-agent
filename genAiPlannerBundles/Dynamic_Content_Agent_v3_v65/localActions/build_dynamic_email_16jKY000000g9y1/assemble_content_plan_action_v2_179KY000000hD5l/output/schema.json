@@ -1,0 +1,70 @@
+{
+  "unevaluatedProperties" : false,
+  "properties" : {
+    "elementsJson" : {
+      "title" : "Elements Json",
+      "description" : "JSON array of content elements, ready for Build Dynamic Email.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "errorMessage" : {
+      "title" : "Error Message",
+      "description" : "Error Message",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "personalizationsJson" : {
+      "title" : "Personalizations Json",
+      "description" : "JSON array of {ppName, ppLabel, decisionsJson, targetsJson} -- one entry per independent personalization axis, ready for Build Dynamic Email. Omitted when the structure plan had no personalizations.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "preheader" : {
+      "title" : "Preheader",
+      "description" : "Preheader",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "subjectLine" : {
+      "title" : "Subject Line",
+      "description" : "Subject Line",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "success" : {
+      "title" : "Success",
+      "description" : "Success",
+      "lightning:type" : "lightning__booleanType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "title" : {
+      "title" : "Title",
+      "description" : "Title",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "urlName" : {
+      "title" : "Url Name",
+      "description" : "Deterministically slugified from title plus a unique suffix -- never LLM-filled, so Build Dynamic Email can be called without an LLM turn present.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    }
+  },
+  "lightning:type" : "lightning__objectType"
+}

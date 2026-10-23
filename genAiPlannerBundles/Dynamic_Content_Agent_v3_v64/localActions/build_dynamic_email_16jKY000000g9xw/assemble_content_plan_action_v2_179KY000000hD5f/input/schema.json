@@ -1,0 +1,21 @@
+{
+  "required" : [ "structurePlanJson", "copyJson" ],
+  "unevaluatedProperties" : false,
+  "properties" : {
+    "copyJson" : {
+      "title" : "Copy Json",
+      "description" : "The copyJson from Write Email Copy, for that SAME structure plan.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "structurePlanJson" : {
+      "title" : "Structure Plan Json",
+      "description" : "The structurePlanJson from Plan Email Structure.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    }
+  },
+  "lightning:type" : "lightning__objectType"
+}

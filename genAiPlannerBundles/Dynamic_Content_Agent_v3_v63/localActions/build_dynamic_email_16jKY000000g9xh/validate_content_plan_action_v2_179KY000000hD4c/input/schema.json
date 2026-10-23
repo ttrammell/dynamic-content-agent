@@ -1,0 +1,21 @@
+{
+  "required" : [ "elementsJson" ],
+  "unevaluatedProperties" : false,
+  "properties" : {
+    "elementsJson" : {
+      "title" : "Elements Json",
+      "description" : "The elementsJson just produced by Assemble Content Plan.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "personalizationsJson" : {
+      "title" : "Personalizations Json",
+      "description" : "The personalizationsJson just produced by Assemble Content Plan, if personalizing. Omit if not personalizing.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    }
+  },
+  "lightning:type" : "lightning__objectType"
+}

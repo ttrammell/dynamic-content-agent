@@ -1,0 +1,28 @@
+{
+  "required" : [ "Input:UserIntent" ],
+  "unevaluatedProperties" : false,
+  "properties" : {
+    "Input:DataGraphContext" : {
+      "title" : "Input:Data Graph Context",
+      "description" : "Confirmed data-graph field API names available for personalization. Omit if none confirmed -- never fabricate this.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "Input:BrandContext" : {
+      "title" : "Input:Brand Context",
+      "description" : "Brand asset name-to-contentKey pairs already discovered. Omit if none found -- never fabricate this.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "Input:UserIntent" : {
+      "title" : "Input:User Intent",
+      "description" : "Plain-language description of what the email should contain and, if applicable, how it should be personalized. Use the user's own request -- don't paraphrase away specifics they gave you.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    }
+  },
+  "lightning:type" : "lightning__objectType"
+}

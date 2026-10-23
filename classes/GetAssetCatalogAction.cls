@@ -72,6 +72,11 @@ public with sharing class GetAssetCatalogAction {
     @TestVisible
     private static List<Object> discoverImages(String brandName, Boolean includeStock) {
         Map<String, Object> byKey = new Map<String, Object>();  // dedup on contentKey, insertion-ordered
+        // 0. Contentful heroes (only when a Contentful connection is configured in THIS org). These
+        //    carry a direct assetUrl (CDN) and NO contentKey -- Build emits them as url-mode image
+        //    blocks (no CMS publish needed). Highest priority so a brand's real hero wins the cap. Keyed
+        //    in byKey by a synthetic "url:<assetUrl>" so dedup still works alongside contentKey assets.
+        for (Object o : contentfulHeroes(brandName)) { addAsset(byKey, o); }
         // 1. Brand assets (only if a brand was named) -- highest priority, kept ahead of the cap.
         if (String.isNotBlank(brandName)) {
             for (Object o : FindBrandAssetsAction.searchAssets(brandName, MAX_CATALOG)) { addAsset(byKey, o); }
@@ -85,7 +90,7 @@ public with sharing class GetAssetCatalogAction {
         if (includeStock) {
             for (Object o : FindBrandAssetsAction.searchAssets('Stock ', MAX_CATALOG)) { addAsset(byKey, o); }
         }
-        // Cap in insertion order (brand -> structural -> stock), stamping swapEligible on each survivor.
+        // Cap in insertion order (contentful -> brand -> structural -> stock), stamping swapEligible.
         List<Object> out = new List<Object>();
         for (Object o : byKey.values()) {
             if (out.size() >= MAX_CATALOG) { break; }
@@ -118,6 +123,17 @@ public with sharing class GetAssetCatalogAction {
     // flag (e.g. a catalog serialized by older code) default to eligible, so this never UNDERcounts a
     // legitimately-swappable image on a stale payload.
     public static List<String> swapEligibleKeys(String assetsJson) {
+        return swapEligibleKeys(assetsJson, null);
+    }
+
+    // Overload: additionally EXCLUDE a set of contentKeys from the swap pool -- used to drop the
+    // resolved banner logo/header keys, which are otherwise swap-eligible catalog images (header/hero
+    // discovery adds them) but must NOT be offered as a per-audience body-image swap: the banner
+    // already renders them, and picking one for a body slot produces a "banner duplicate" that Build
+    // drops -- which, if that slot was personalized, orphaned the PP target and rolled the build back.
+    // Excluding by the SPECIFIC resolved keys (not by name) keeps legitimate header/hero images
+    // swappable in orgs that rely on them. See [[feedback_dc_agent_exclude_banner_keys_from_swap_pool]].
+    public static List<String> swapEligibleKeys(String assetsJson, Set<String> excludeKeys) {
         List<String> out = new List<String>();
         Set<String> seen = new Set<String>();
         if (String.isBlank(assetsJson)) { return out; }
@@ -130,6 +146,7 @@ public with sharing class GetAssetCatalogAction {
             Map<String, Object> a = (Map<String, Object>) o;
             String ck = a.get('contentKey') == null ? '' : String.valueOf(a.get('contentKey'));
             if (String.isBlank(ck) || seen.contains(ck)) { continue; }
+            if (excludeKeys != null && excludeKeys.contains(ck)) { continue; }   // resolved banner key
             // Absent flag -> treat as eligible (back-compat with a catalog built before this field).
             Object se = a.get('swapEligible');
             if (se == false) { continue; }
@@ -138,10 +155,166 @@ public with sharing class GetAssetCatalogAction {
         return out;
     }
 
+    // Ordered, DISTINCT list of swap-ELIGIBLE off-CMS image URLs from an assetsJson (assets that have
+    // an assetUrl and no contentKey), in catalog order. Parallel to swapEligibleKeys for the url-mode
+    // (Contentful) assets, so the image auto-assign round-robin can hand a decision a direct URL when
+    // the plan named no asset. Same swapEligible semantics (absent flag -> eligible).
+    public static List<String> swapEligibleUrls(String assetsJson) {
+        List<String> out = new List<String>();
+        Set<String> seen = new Set<String>();
+        if (String.isBlank(assetsJson)) { return out; }
+        Object parsed;
+        try { parsed = JSON.deserializeUntyped(AuraPocJson.stripFence(assetsJson)); }
+        catch (Exception e) { return out; }
+        if (!(parsed instanceof List<Object>)) { return out; }
+        for (Object o : (List<Object>) parsed) {
+            if (!(o instanceof Map<String, Object>)) { continue; }
+            Map<String, Object> a = (Map<String, Object>) o;
+            String ck = a.get('contentKey') == null ? '' : String.valueOf(a.get('contentKey'));
+            if (String.isNotBlank(ck)) { continue; }   // CMS asset -> handled by swapEligibleKeys
+            String au = a.get('assetUrl') == null ? '' : String.valueOf(a.get('assetUrl'));
+            if (String.isBlank(au) || seen.contains(au)) { continue; }
+            if (a.get('swapEligible') == false) { continue; }
+            seen.add(au); out.add(au);
+        }
+        return out;
+    }
+
     private static void addAsset(Map<String, Object> byKey, Object o) {
         if (!(o instanceof Map<String, Object>)) { return; }
         Map<String, Object> a = (Map<String, Object>) o;
         String ck = a.get('contentKey') == null ? '' : String.valueOf(a.get('contentKey'));
-        if (String.isNotBlank(ck) && !byKey.containsKey(ck)) { byKey.put(ck, a); }
+        String au = a.get('assetUrl') == null ? '' : String.valueOf(a.get('assetUrl'));
+        // CMS asset -> dedup on contentKey. Off-CMS (Contentful) asset -> no contentKey, dedup on a
+        // synthetic "url:<assetUrl>" key so it still unions/dedupes alongside CMS assets.
+        String dedupKey = String.isNotBlank(ck) ? ck : (String.isNotBlank(au) ? 'url:' + au : '');
+        if (String.isNotBlank(dedupKey) && !byKey.containsKey(dedupKey)) { byKey.put(dedupKey, a); }
+    }
+
+    // ── Contentful heroes (optional, connection-gated) ──────────────────────────────────────────
+    // Returns the named brand's Contentful hero assets as catalog items {name, urlName, assetUrl,
+    // source:'contentful'} -- a direct CDN url, NO CMS contentKey (Build emits them as url-mode image
+    // blocks, so nothing is published to CMS first). Empty list (fail-soft) when Contentful is not
+    // configured in this org, or any read fails -- the agent then behaves exactly as before. The
+    // custom setting is referenced DYNAMICALLY so this class compiles/deploys in orgs that don't have
+    // the Contentful-MCNext package (the setting simply won't be in getGlobalDescribe there).
+    @TestVisible
+    private static List<Object> contentfulHeroes(String brandName) {
+        List<Object> out = new List<Object>();
+        try {
+            if (!Schema.getGlobalDescribe().containsKey('Contentful_Settings__c')) { return out; }
+            SObject cfg = contentfulConfig();
+            if (cfg == null) { return out; }
+            String space = strField(cfg, 'Space_Id__c');
+            String deliveryToken = strField(cfg, 'Delivery_Token__c');
+            if (String.isBlank(space) || String.isBlank(deliveryToken)) { return out; }   // not connected
+            String env = String.isBlank(strField(cfg, 'Environment_Id__c')) ? 'master' : strField(cfg, 'Environment_Id__c');
+
+            // Read heroAsset entries (same content type + include=1 asset resolution the companion app uses).
+            String url = 'https://cdn.contentful.com/spaces/' + space + '/environments/' + env
+                + '/entries?content_type=heroAsset&include=1&limit=100';
+            HttpRequest req = new HttpRequest();
+            req.setEndpoint(url);
+            req.setMethod('GET');
+            req.setHeader('Authorization', 'Bearer ' + deliveryToken);
+            req.setTimeout(120000);
+            HttpResponse res = new Http().send(req);
+            if (res.getStatusCode() < 200 || res.getStatusCode() >= 300) { return out; }
+            Map<String, Object> data = (Map<String, Object>) JSON.deserializeUntyped(res.getBody());
+
+            Map<String, String> assetUrlById = contentfulAssetUrls(data);
+            String wantBrand = String.isBlank(brandName) ? '' : brandName.trim().toLowerCase();
+            Object itemsObj = data.get('items');
+            if (!(itemsObj instanceof List<Object>)) { return out; }
+            for (Object io : (List<Object>) itemsObj) {
+                Map<String, Object> entry = (Map<String, Object>) io;
+                Map<String, Object> f = (Map<String, Object>) entry.get('fields');
+                if (f == null) { continue; }
+                // Brand filter: when a brand is named, keep only its heroes; otherwise take all.
+                String entryBrand = f.get('brandId') == null ? '' : String.valueOf(f.get('brandId')).trim().toLowerCase();
+                String entryTitle = f.get('title') == null ? '' : String.valueOf(f.get('title'));
+                if (String.isNotBlank(wantBrand) && String.isNotBlank(entryBrand)
+                        && !entryBrand.contains(wantBrand) && !wantBrand.contains(entryBrand)) { continue; }
+                String au = contentfulImageUrl(f, assetUrlById);
+                if (String.isBlank(au)) { continue; }
+                Map<String, Object> sysMap = (Map<String, Object>) entry.get('sys');
+                String nm = String.isNotBlank(entryTitle) ? entryTitle
+                    : (sysMap != null ? String.valueOf(sysMap.get('id')) : 'Contentful hero');
+                // Selection metadata for the plan LLM (rides along in assetsJson -> base_brand_context
+                // -> the plan prompt's BrandContext). Lets the model PREFER a hero by intent (theme/
+                // searchText/caption) and MAP a hero to a decision by audience (audienceFit) -- authoring
+                // -time hints only. Inert to Build (resolveImageRefs/auto-assign ignore unknown keys);
+                // the chosen assetName still resolves deterministically. Generic key names (audienceFit,
+                // not the Contentful-specific loyaltyTierFit) keep the agent source-agnostic. Omitted
+                // when blank so absent = "no hint", never an empty-string red herring.
+                Map<String, Object> hero = new Map<String, Object>{
+                    'name' => nm,
+                    'urlName' => sysMap != null ? String.valueOf(sysMap.get('id')) : nm,
+                    'assetUrl' => au,
+                    'source' => 'contentful'
+                };
+                String theme = f.get('theme') == null ? '' : String.valueOf(f.get('theme')).trim();
+                String audienceFit = f.get('loyaltyTierFit') == null ? '' : String.valueOf(f.get('loyaltyTierFit')).trim();
+                String caption = f.get('caption') == null ? '' : String.valueOf(f.get('caption')).trim();
+                String searchText = f.get('searchText') == null ? '' : String.valueOf(f.get('searchText')).trim();
+                if (String.isNotBlank(theme)) { hero.put('theme', theme); }
+                if (String.isNotBlank(audienceFit)) { hero.put('audienceFit', audienceFit); }
+                if (String.isNotBlank(caption)) { hero.put('caption', caption); }
+                if (String.isNotBlank(searchText)) { hero.put('searchText', searchText.abbreviate(160)); }
+                out.add(hero);
+            }
+        } catch (Exception e) {
+            return new List<Object>();   // fail-soft: Contentful is a nice-to-have, never blocks the catalog
+        }
+        return out;
+    }
+
+    private static SObject contentfulConfig() {
+        // Custom Setting (hierarchy or list). Query dynamically: prefer a 'Default' named row, else any
+        // row with a Space_Id__c. Returns null if none.
+        try {
+            List<SObject> rows = Database.query(
+                'SELECT Space_Id__c, Delivery_Token__c, Environment_Id__c FROM Contentful_Settings__c '
+                + 'ORDER BY Name LIMIT 50'
+            );
+            for (SObject r : rows) { if (String.isNotBlank(strField(r, 'Space_Id__c'))) { return r; } }
+        } catch (Exception e) { /* field/object not present -> treat as not configured */ }
+        return null;
+    }
+
+    private static String strField(SObject r, String field) {
+        try { Object v = r.get(field); return v == null ? '' : String.valueOf(v); }
+        catch (Exception e) { return ''; }
+    }
+
+    private static Map<String, String> contentfulAssetUrls(Map<String, Object> data) {
+        Map<String, String> byId = new Map<String, String>();
+        Object includesObj = data.get('includes');
+        if (!(includesObj instanceof Map<String, Object>)) { return byId; }
+        Object assetsObj = ((Map<String, Object>) includesObj).get('Asset');
+        if (!(assetsObj instanceof List<Object>)) { return byId; }
+        for (Object ao : (List<Object>) assetsObj) {
+            Map<String, Object> asset = (Map<String, Object>) ao;
+            Map<String, Object> f = (Map<String, Object>) asset.get('fields');
+            Map<String, Object> sysMap = (Map<String, Object>) asset.get('sys');
+            if (f == null || sysMap == null) { continue; }
+            Map<String, Object> file = (Map<String, Object>) f.get('file');
+            if (file == null) { continue; }
+            String u = file.get('url') == null ? '' : String.valueOf(file.get('url'));
+            if (String.isBlank(u)) { continue; }
+            if (u.startsWith('//')) { u = 'https:' + u; }   // Contentful returns protocol-relative urls
+            byId.put(String.valueOf(sysMap.get('id')), u);
+        }
+        return byId;
+    }
+
+    private static String contentfulImageUrl(Map<String, Object> fields, Map<String, String> assetUrls) {
+        Object link = fields.get('image');
+        if (link == null) { link = fields.get('logo'); }
+        if (!(link instanceof Map<String, Object>)) { return ''; }
+        Map<String, Object> sysMap = (Map<String, Object>) ((Map<String, Object>) link).get('sys');
+        if (sysMap == null) { return ''; }
+        String u = assetUrls.get(String.valueOf(sysMap.get('id')));
+        return u == null ? '' : u;
     }
 }

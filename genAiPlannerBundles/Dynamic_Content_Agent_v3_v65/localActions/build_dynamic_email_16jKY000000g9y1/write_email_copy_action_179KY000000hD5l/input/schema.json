@@ -1,0 +1,35 @@
+{
+  "required" : [ "Input:StructurePlan" ],
+  "unevaluatedProperties" : false,
+  "properties" : {
+    "Input:UserIntent" : {
+      "title" : "Input:User Intent",
+      "description" : "The user's own original request, for tone and context.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "Input:BrandVoice" : {
+      "title" : "Input:Brand Voice",
+      "description" : "The brand record's description/identity/tone (from Find Brand Record), if a brand record was found for this brand. Omit if none found -- copy will default to a neutral, professional tone.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "Input:BrandContext" : {
+      "title" : "Input:Brand Context",
+      "description" : "Brand asset name-to-contentKey pairs already discovered. Omit if none found.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    },
+    "Input:StructurePlan" : {
+      "title" : "Input:Structure Plan",
+      "description" : "The structurePlanJson just produced by Plan Email Structure.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isUserInput" : false
+    }
+  },
+  "lightning:type" : "lightning__objectType"
+}

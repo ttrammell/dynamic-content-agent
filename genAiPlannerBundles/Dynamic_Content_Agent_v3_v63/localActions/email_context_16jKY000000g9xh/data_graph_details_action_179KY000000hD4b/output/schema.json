@@ -1,0 +1,54 @@
+{
+  "unevaluatedProperties" : false,
+  "properties" : {
+    "availableGraphNamesJson" : {
+      "title" : "Available Graph Names Json",
+      "description" : "Only set when fieldsJson is empty. The real graph names to choose from when graphCount > 1.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "errorMessage" : {
+      "title" : "Error Message",
+      "description" : "If this org has more than one data graph and none/an invalid name was specified, lists the real available names here -- ask the user which one to use rather than guessing.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "fieldsJson" : {
+      "title" : "Fields Json",
+      "description" : "The full data graph definition (DMOs and fields) as JSON.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "graphCount" : {
+      "title" : "Graph Count",
+      "description" : "Only set when fieldsJson is empty. 0 = no data graphs exist in this org. >1 = ambiguous, see availableGraphNamesJson.",
+      "lightning:type" : "lightning__integerType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "resolvedGraphApiName" : {
+      "title" : "Resolved Graph Api Name",
+      "description" : "The actual data graph API name that was queried, whether auto-detected or explicitly passed.",
+      "lightning:type" : "lightning__textType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    },
+    "success" : {
+      "title" : "Success",
+      "description" : "Success",
+      "lightning:type" : "lightning__booleanType",
+      "lightning:isPII" : false,
+      "copilotAction:isDisplayable" : false,
+      "copilotAction:isUsedByPlanner" : true
+    }
+  },
+  "lightning:type" : "lightning__objectType"
+}

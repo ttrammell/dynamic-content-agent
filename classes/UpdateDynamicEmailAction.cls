@@ -90,13 +90,52 @@ public with sharing class UpdateDynamicEmailAction {
                 // out of range, the wrong block type, or already personalized (edit-existing-DC is
                 // off-limits for now).
                 List<Object> ppSpecs = (List<Object>) JSON.deserializeUntyped(AuraPocJson.stripFence(req.personalizationsJson));
-                Map<String, Object> blockIds = recoverBlockIds(contentBody, ppSpecs, req.targetSlotsJson);
+                // Live block definitions per target (elementKey -> definition), so the wire path can build
+                // a swap variant matching the EXISTING block type -- chiefly an html-image slot needs an
+                // html swap variant, not a url-mode lightning/image variant (which renders nothing on an
+                // html base). Populated by recoverBlockIds; handed to the wire via a static on Build.
+                Map<String, String> liveDefByElementKey = new Map<String, String>();
+                Map<String, Object> blockIds = recoverBlockIds(contentBody, ppSpecs, req.targetSlotsJson, liveDefByElementKey);
+
+                // WORKSPACE GUARD: confine the swap-image catalog to THIS email's workspace, same as the
+                // build path. A swap image from another workspace can't be referenced from this email --
+                // the variant PUT 403s (INVALID_INPUT "isn't shared with this workspace") and the update
+                // rolls back. Resolve the email's own workspace from its ManagedContent, then filter
+                // req.assetsJson before any variant resolution. Fail-soft: if the workspace can't be
+                // read, skip the guard (no behavior change). See [[project_dc_agent_workspace_scoped_brands]].
+                String emailWorkspaceId = null;
+                try {
+                    for (ManagedContent mc : [ SELECT AuthoredManagedContentSpaceId FROM ManagedContent
+                                               WHERE Id = :managedContentId LIMIT 1 ]) {
+                        emailWorkspaceId = String.valueOf(mc.AuthoredManagedContentSpaceId);
+                    }
+                } catch (Exception wsEx) { emailWorkspaceId = null; }
+                List<String> droppedXwsAssets = new List<String>();
+                if (String.isNotBlank(emailWorkspaceId)) {
+                    req.assetsJson = BuildDynamicEmailAction.sharedFilterAssetsToWorkspace(
+                        req.assetsJson, emailWorkspaceId, droppedXwsAssets);
+                }
 
                 // Resolve image-SWAP variant keys by name (Update has no logo/header override inputs,
                 // so role-based variant images aren't supported here -- name or literal only), then
-                // existence-check them. Same LLM-key-free guarantee as Build.
-                Set<String> variantImgKeys = BuildDynamicEmailAction.sharedResolveVariantImageRefs(
-                    ppSpecs, req.assetsJson, '', '');
+                // existence-check them. Same LLM-key-free guarantee as Build. A swap image dropped by the
+                // workspace guard above surfaces as "does not exist in this org's brand assets" -- make
+                // that specific so the user knows it's a workspace mismatch, not a missing asset.
+                Set<String> variantImgKeys;
+                try {
+                    variantImgKeys = BuildDynamicEmailAction.sharedResolveVariantImageRefs(
+                        ppSpecs, req.assetsJson, '', '');
+                } catch (Exception resEx) {
+                    if (!droppedXwsAssets.isEmpty() && resEx.getMessage() != null
+                            && resEx.getMessage().contains('does not exist in this org')) {
+                        res.errorMessage = resEx.getMessage() + ' NOTE: ' + droppedXwsAssets.size()
+                            + ' catalog image(s) (' + String.join(droppedXwsAssets, ', ') + ') were excluded '
+                            + 'because they live in a different CMS workspace than this email and can\'t be '
+                            + 'referenced here. Pick a swap image from this email\'s workspace.';
+                        results.add(res); continue;
+                    }
+                    throw resEx;
+                }
                 BuildDynamicEmailAction.sharedValidateImageContentKeys(accessToken, variantImgKeys);
 
                 // 3. Seed operations/variants/expressions from the EXISTING body so wiring MERGES.
@@ -132,6 +171,18 @@ public with sharing class UpdateDynamicEmailAction {
                 String graphName = String.isNotBlank(req.profileDataGraphName)
                     ? req.profileDataGraphName : resolveDefaultGraphName(accessToken);
 
+                // Parse the live graph topology so PP criteria are built with the field's REAL owning DMO
+                // + relationship path -- the SAME graph-aware resolution the fresh-build path uses. Without
+                // this the update built criteria with topo=null (legacy hardcoded alias), and PP-create
+                // rejected fields that need graph resolution ("Could not find field ... of
+                // UnifiedIndividual__dlm"). Fail-soft to null (legacy behavior) if the fetch/parse fails.
+                DataGraphTopology updTopo = null;
+                try {
+                    if (String.isNotBlank(graphName)) {
+                        updTopo = DataGraphTopology.parse(DataGraphDetailsAction.fetchGraphBody(accessToken, graphName));
+                    }
+                } catch (Exception topoEx) { updTopo = null; }
+
                 // 4. Wire -- append the new PP(s) into the seeded lists (reuses the create path).
                 AuraSessionMinter.Session sess = AuraSessionMinter.mint(accessToken, AuraPocTokenProvider.instanceUrl());
                 String auraContextJson = JSON.serialize(new Map<String, Object>{
@@ -140,13 +191,26 @@ public with sharing class UpdateDynamicEmailAction {
                 });
                 List<Object> newVariantIdEntries = new List<Object>();
                 List<String> createdPpNames = new List<String>();
+                // On UPDATE, a URL-image swap must conform to the EXISTING block's type. For a genuine
+                // lightning/image base (CMS url-mode image) the flag stays OFF so the variant is a
+                // url-mode lightning/image (the platform rejects rawHtml on a lightning/image block,
+                // additionalProperties:false). For an html-image base (build-path URL image) the live-def
+                // map forces an html swap variant regardless of the flag -- see liveBlockDefByElementKey.
+                // See [[feedback_dc_agent_html_block_pp_swap_supported]].
+                Boolean prevAllowHtml = BuildDynamicEmailAction.allowHtmlImageVariants;
+                Map<String, String> prevLiveDef = BuildDynamicEmailAction.liveBlockDefByElementKey;
+                BuildDynamicEmailAction.allowHtmlImageVariants = false;
+                BuildDynamicEmailAction.liveBlockDefByElementKey = liveDefByElementKey;
                 try {
                     BuildDynamicEmailAction.sharedWirePersonalizationsInner(ppSpecs, sess, auraContextJson,
                         expressionsByKey, blockIds, dataSpace, graphName, managedContentId,
-                        allOperations, allVariants, newVariantIdEntries, createdPpNames);
+                        allOperations, allVariants, newVariantIdEntries, createdPpNames, updTopo);
                 } catch (Exception e) {
                     for (String pp : createdPpNames) { BuildDynamicEmailAction.sharedDeletePp(sess, auraContextJson, pp); }
                     throw e;
+                } finally {
+                    BuildDynamicEmailAction.allowHtmlImageVariants = prevAllowHtml;
+                    BuildDynamicEmailAction.liveBlockDefByElementKey = prevLiveDef;
                 }
 
                 // 5. Write the merged body back -- only DC arrays + data provider/expressions change.
@@ -197,7 +261,10 @@ public with sharing class UpdateDynamicEmailAction {
     // ordered walk Read numbered), guarded for range/type/eligibility. FALLBACK = matchText
     // (heading/paragraph) or matchContentKey (image). Fails loud on zero/ambiguous/ineligible so a
     // wrong or already-personalized block is never targeted.
-    private static Map<String, Object> recoverBlockIds(Map<String, Object> contentBody, List<Object> ppSpecs, String targetSlotsJson) {
+    // liveDefByElementKey (out-param): populated with elementKey -> the resolved live block's definition
+    // for every slot-resolved target, so the caller can tell the wire path to build swap variants that
+    // match the existing block type (chiefly an html-image slot -> html variant).
+    private static Map<String, Object> recoverBlockIds(Map<String, Object> contentBody, List<Object> ppSpecs, String targetSlotsJson, Map<String, String> liveDefByElementKey) {
         List<Map<String, Object>> blocks = new List<Map<String, Object>>();
         collectBlocks(contentBody.get('sfdc_cms:block'), blocks);
 
@@ -208,6 +275,11 @@ public with sharing class UpdateDynamicEmailAction {
             String d = String.valueOf(b.get('definition'));
             if (d == 'lightning/heading' || d == 'lightning/paragraph'
                 || d == 'lightning/image' || d == 'lightning/actionButton') { contentBlocks.add(b); }
+            // A URL image the build path rendered as a lightning/html <img> block is ALSO a content
+            // slot -- count it so Read's slot numbering and this resolver agree, and so an update can
+            // personalize it. Only html blocks that are images (rawHtml holds an <img>) count; a generic
+            // html block is not a targetable content slot. See [[feedback_dc_agent_html_block_pp_swap_supported]].
+            else if (d == 'lightning/html' && isHtmlImageBlock(b)) { contentBlocks.add(b); }
         }
         // Ids already carrying a personalization operation -- ineligible to (re-)personalize.
         Set<String> personalizedIds = new Set<String>();
@@ -259,9 +331,13 @@ public with sharing class UpdateDynamicEmailAction {
                     Map<String, Object> blk = contentBlocks[slotNum - 1];
                     String blkDef = String.valueOf(blk.get('definition'));
                     String blkId = String.valueOf(blk.get('id'));
-                    // Type guard: the plan's block type must match the real slot's type.
+                    // Type guard: the plan's block type must match the real slot's type. ONE exception:
+                    // a URL image is planned as lightning/image but lives as a lightning/html <img> block
+                    // (build-path rendering). Accept that pairing; the wire path is told the live type via
+                    // liveBlockDefByElementKey (below) so it emits a matching html swap variant.
                     String wantDef = t.get('blockDefinition') == null ? '' : String.valueOf(t.get('blockDefinition'));
-                    if (String.isNotBlank(wantDef) && wantDef != blkDef) {
+                    Boolean htmlImageForImagePlan = (blkDef == 'lightning/html' && wantDef == 'lightning/image' && isHtmlImageBlock(blk));
+                    if (String.isNotBlank(wantDef) && wantDef != blkDef && !htmlImageForImagePlan) {
                         throw new UpdateException('Update target "' + elementKey + '" expects a ' + wantDef
                             + ' but slot ' + slotNum + ' is a ' + blkDef + '. Pick the slot whose type matches.');
                     }
@@ -272,6 +348,9 @@ public with sharing class UpdateDynamicEmailAction {
                             + 'already personalized.');
                     }
                     blockIds.put(elementKey, blkId);
+                    // Record the LIVE block definition so the wire path builds the swap variant to match
+                    // the existing block (an html-image slot -> html variant, not a url-mode image variant).
+                    liveDefByElementKey.put(elementKey, blkDef);
                     continue;
                 }
 
@@ -321,6 +400,11 @@ public with sharing class UpdateDynamicEmailAction {
                         + 'block that is not already personalized.');
                 }
                 blockIds.put(elementKey, hits[0]);
+                // Record the matched block's live definition too (so an html-image block matched by
+                // contentKey gets an html swap variant, same as the slot path).
+                for (Map<String, Object> b : blocks) {
+                    if (hits[0] == String.valueOf(b.get('id'))) { liveDefByElementKey.put(elementKey, String.valueOf(b.get('definition'))); break; }
+                }
             }
         }
         return blockIds;
@@ -354,6 +438,12 @@ public with sharing class UpdateDynamicEmailAction {
                 if (attrs.get('text') instanceof String) {
                     attrs.put('text', decodeEntitiesOneLayer((String) attrs.get('text')));
                 }
+                // Same single-layer decode for a lightning/html block's rawHtml (e.g. an external-URL
+                // image rendered as an <img> block) -- otherwise the re-PUT double-escapes it exactly
+                // like it would a text block, and the image renders as literal markup. One layer only.
+                if (attrs.get('rawHtml') instanceof String) {
+                    attrs.put('rawHtml', decodeEntitiesOneLayer((String) attrs.get('rawHtml')));
+                }
             }
             for (Object v : n.values()) { decodeBlockTextOneLayer(v); }
         }
@@ -372,6 +462,21 @@ public with sharing class UpdateDynamicEmailAction {
             .replace('&gt;', '>')
             .replace('&nbsp;', ' ')
             .replace('&amp;', '&');
+    }
+
+    // True when a lightning/html block's rawHtml holds an <img> -- i.e. it's a URL image rendered by the
+    // build path, not a generic html block. The GET'd rawHtml is entity-encoded (&lt;img...), so check
+    // both the decoded-one-layer form and the raw encoded form. Case-insensitive on the tag.
+    private static Boolean isHtmlImageBlock(Map<String, Object> b) {
+        if (b == null || !'lightning/html'.equals(String.valueOf(b.get('definition')))) { return false; }
+        Object attrsObj = b.get('attributes');
+        if (!(attrsObj instanceof Map<String, Object>)) { return false; }
+        Object rawObj = ((Map<String, Object>) attrsObj).get('rawHtml');
+        if (!(rawObj instanceof String)) { return false; }
+        String raw = (String) rawObj;
+        String decoded = decodeEntitiesOneLayer(raw);
+        String probe = (decoded == null ? '' : decoded).toLowerCase() + '\n' + raw.toLowerCase();
+        return probe.contains('<img') || probe.contains('&lt;img');
     }
 
     private static void collectBlocks(Object node, List<Map<String, Object>> out) {
@@ -394,7 +499,12 @@ public with sharing class UpdateDynamicEmailAction {
                 }
                 out.add(new Map<String, Object>{
                     'id' => n.get('id'), 'definition' => n.get('definition'),
-                    'text' => attrs.get('text'), 'contentKey' => ck
+                    'text' => attrs.get('text'), 'contentKey' => ck,
+                    // Carry rawHtml so a lightning/html block can be recognized as an image slot
+                    // (isHtmlImageBlock inspects it). Null for every non-html block. Nested under a
+                    // top-level 'attributes' so isHtmlImageBlock finds it the same way it would on a
+                    // raw block node.
+                    'attributes' => new Map<String, Object>{ 'rawHtml' => attrs.get('rawHtml') }
                 });
             }
             for (Object v : n.values()) { collectBlocks(v, out); }
@@ -403,6 +513,15 @@ public with sharing class UpdateDynamicEmailAction {
 
     // Resolve the org's default data graph name via Tooling, for an update that didn't pass one.
     private static String resolveDefaultGraphName(String accessToken) {
+        // Use the SAME resolver the build path uses (READY-graph filter + proper single-graph selection)
+        // so an update with no explicit graph resolves the real graph -- NOT an arbitrary SELECT ... LIMIT 1,
+        // which could pick the wrong/non-READY graph and make every field read "not present in data graph"
+        // when its topology is parsed. Fall back to the raw first-graph query only if the shared resolver
+        // yields nothing.
+        try {
+            String resolved = DataGraphDetailsAction.resolveGraphApiName(accessToken, null);
+            if (String.isNotBlank(resolved)) { return resolved; }
+        } catch (Exception e) { /* fall through to raw query */ }
         try {
             HttpRequest r = new HttpRequest();
             r.setMethod('GET');
