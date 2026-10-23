@@ -92,8 +92,28 @@ public with sharing class ResolveBrandingAction {
     // missing-workspace build failure. Empty string means "resolved fine / not the reason".
     @TestVisible static String workspaceDiag = '';
 
+    // The set of email-capable (Enhanced + spaceType "marketing") CMS workspace ids, normalized to the
+    // 15-char case-sensitive form, as last read from the Connect /spaces API. Populated by
+    // resolveEmailCapableWorkspaceId() on each call. Used to VALIDATE an asset-derived workspace: an
+    // asset can live in a NON-marketing Enhanced space (e.g. "All Commerce - Enhanced", typeApi
+    // "content"), and committing that as the email's workspace makes the CMS create 400 with "content
+    // type sfdc_cms__email are not supported by this space" -- a live demo failure. Empty when the
+    // /spaces call hasn't run or failed. See [[project_dc_agent_workspace_scoped_brands]].
+    @TestVisible static Set<String> emailCapableSpaceIds = new Set<String>();
+
+    // Normalize a ManagedContentSpace id for comparison: /spaces returns 18-char ids, brand assets may
+    // carry either width; compare on the uppercased 15-char prefix (first 15 chars are the real id).
+    @TestVisible
+    private static String normSpaceId(String id) {
+        if (String.isBlank(id)) { return ''; }
+        String s = id.trim();
+        if (s.length() > 15) { s = s.substring(0, 15); }
+        return s.toUpperCase();
+    }
+
     private static String resolveEmailCapableWorkspaceId() {
         workspaceDiag = '';
+        emailCapableSpaceIds = new Set<String>();
         try {
             String accessToken = tokenSource.getAccessToken();
             HttpRequest httpReq = new HttpRequest();
@@ -124,6 +144,9 @@ public with sharing class ResolveBrandingAction {
                 String typeApi = st == null ? '' : String.valueOf(st.get('apiName'));
                 if (!enhanced || typeApi != 'marketing') { continue; }
 
+                // Record every email-capable space id so callers can validate an asset-derived pick.
+                emailCapableSpaceIds.add(normSpaceId(String.valueOf(sp.get('id'))));
+
                 if (String.valueOf(sp.get('apiName')) == 'Default_Content_Workspace') {
                     defaultId = String.valueOf(sp.get('id'));
                 }
@@ -142,6 +165,29 @@ public with sharing class ResolveBrandingAction {
                 + ') -- likely the JWT/External Client App auth or a Remote Site Setting is missing';
             return '';
         }
+    }
+
+    // Is the given workspace id known to be email-capable? Lazily populates emailCapableSpaceIds via
+    // one /spaces call if it hasn't been fetched yet this transaction. Fail-soft: if the capable set
+    // can't be read (auth/callout failure), returns TRUE so a transient /spaces failure never blocks a
+    // workspace that an asset legitimately came from (the build's own content-type check is the final
+    // backstop). Only a CONFIRMED non-marketing space (set read successfully, id absent) returns false.
+    private static Boolean isEmailCapable(String workspaceId) {
+        if (String.isBlank(workspaceId)) { return false; }
+        if (emailCapableSpaceIds.isEmpty()) { resolveEmailCapableWorkspaceId(); }
+        if (emailCapableSpaceIds.isEmpty()) { return true; }   // couldn't read the set -> don't block
+        return emailCapableSpaceIds.contains(normSpaceId(workspaceId));
+    }
+
+    // Does this brand asset/record live in the chosen email workspace? A blank asset workspaceId (older
+    // catalog, or a record without one) is treated as matching -- Build's own cross-workspace guard is
+    // the final backstop, so we only suppress on a CONFIRMED mismatch. Blank chosen workspace -> no
+    // match (nothing to commit against).
+    private static Boolean assetInWorkspace(Map<String, Object> asset, String workspaceId) {
+        if (asset == null || String.isBlank(workspaceId)) { return false; }
+        Object ws = asset.get('workspaceId');
+        if (ws == null || String.isBlank(String.valueOf(ws))) { return true; }   // unknown -> don't block
+        return normSpaceId(String.valueOf(ws)) == normSpaceId(workspaceId);
     }
 
     private static List<Object> parseArray(String s) {
@@ -186,6 +232,9 @@ public with sharing class ResolveBrandingAction {
             Map<String, Object> header;
             // Tier 0: a user-pinned workspace id wins over every auto-resolution tier below.
             String workspaceId = (req.workspaceOverride == null) ? '' : req.workspaceOverride.trim();
+            // Did the pin supply the workspace? The user override is the escape hatch -- it bypasses the
+            // email-capable validation below (the user may know something /spaces doesn't expose).
+            Boolean workspaceFromOverride = String.isNotBlank(workspaceId);
             for (Object o : parseArray(req.brandContext)) {
                 if (!(o instanceof Map<String, Object>)) { continue; }
                 Map<String, Object> asset = (Map<String, Object>) o;
@@ -236,11 +285,32 @@ public with sharing class ResolveBrandingAction {
                 if (String.isNotBlank(workspaceId)) { usedDefaultFallback = true; }
             }
 
-            if (logo != null && logo.get('contentKey') != null) {
+            // EMAIL-CAPABLE VALIDATION (bulletproofing): the asset/default/record tiers above adopt the
+            // workspace of whatever brand asset they matched. A brand image can live in a NON-marketing
+            // Enhanced space (e.g. "All Commerce - Enhanced", spaceType "content"); committing that as the
+            // email's workspace makes Build's CMS create 400 with "content type sfdc_cms__email are not
+            // supported by this space" -- the live-demo workspace error. So unless the workspace came from
+            // the user override (escape hatch), verify it is email-capable; if NOT, discard it and resolve
+            // a real Marketing workspace via /spaces. isEmailCapable fail-soft returns true when the
+            // capable set can't be read, so a transient /spaces failure never blocks a legit workspace.
+            if (!workspaceFromOverride && String.isNotBlank(workspaceId) && !isEmailCapable(workspaceId)) {
+                String capable = resolveEmailCapableWorkspaceId();
+                workspaceId = String.isNotBlank(capable) ? capable : '';  // blank -> missing-workspace note fires
+                if (String.isNotBlank(workspaceId)) { usedDefaultFallback = true; }
+            }
+
+            // Commit logo/header ONLY when they live in the SAME workspace as the chosen email workspace.
+            // A logo/header from another workspace can't be referenced from the email -- its base-image
+            // PUT 403s (cross-workspace) and rolls the build back. Suppress the mismatched slot instead
+            // (a no-logo email beats a mid-demo rollback). A blank asset workspaceId (back-compat) is
+            // treated as matching. Override-pinned workspaces skip the check (user's responsibility).
+            if (logo != null && logo.get('contentKey') != null
+                    && (workspaceFromOverride || assetInWorkspace(logo, workspaceId))) {
                 res.resolvedLogoKey = String.valueOf(logo.get('contentKey'));
                 res.suppressLogo = false;
             }
-            if (header != null && header.get('contentKey') != null) {
+            if (header != null && header.get('contentKey') != null
+                    && (workspaceFromOverride || assetInWorkspace(header, workspaceId))) {
                 res.resolvedHeaderKey = String.valueOf(header.get('contentKey'));
                 res.suppressHeader = false;
             }
@@ -254,11 +324,17 @@ public with sharing class ResolveBrandingAction {
                 String recKey = rec.get('contentKey') != null ? String.valueOf(rec.get('contentKey')) : '';
                 // Never let the record key collide with a logo/header image key -- Build Dynamic
                 // Email hard-rejects that (a record key and an image key are never legitimately equal).
-                if (String.isNotBlank(recKey) && recKey != res.resolvedLogoKey && recKey != res.resolvedHeaderKey) {
+                // Also require the record to live in the chosen workspace (same cross-workspace 403 guard
+                // as logo/header): a brand record from another workspace can't be referenced here.
+                if (String.isNotBlank(recKey) && recKey != res.resolvedLogoKey && recKey != res.resolvedHeaderKey
+                        && (workspaceFromOverride || assetInWorkspace(rec, workspaceId))) {
                     res.resolvedBrandRecordKey = recKey;
                     brandRecName = rec.get('name') != null ? String.valueOf(rec.get('name')) : '';
                 }
-                if (String.isBlank(workspaceId) && rec.get('workspaceId') != null) {
+                // Legacy fallback: adopt the record's workspace ONLY if nothing resolved one AND it is
+                // email-capable (never commit the email into a non-marketing space).
+                if (String.isBlank(workspaceId) && rec.get('workspaceId') != null
+                        && isEmailCapable(String.valueOf(rec.get('workspaceId')))) {
                     workspaceId = String.valueOf(rec.get('workspaceId'));
                 }
                 // Fold the record's voice prose (description/identity/tone) into a single line for the

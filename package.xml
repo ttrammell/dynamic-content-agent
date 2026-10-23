@@ -31,8 +31,6 @@
         <members>AuraPocTokenSource</members>
         <members>AuraServiceClient</members>
         <members>AuraSessionMinter</members>
-        <members>DataGraphTopology</members>
-        <members>FillCopyActionTest</members>
         <name>ApexClass</name>
     </types>
     <types>
