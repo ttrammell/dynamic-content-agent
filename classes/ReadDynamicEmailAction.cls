@@ -73,6 +73,13 @@ public with sharing class ReadDynamicEmailAction {
                 if (String.isBlank(key)) {
                     res.errorMessage = 'Could not resolve "' + res.contentKey + '" to a CMS email. '
                         + 'Provide the email\'s content key (MC...) or its ManagedContent record Id (20Y...).';
+                    // CRITICAL: a failed resolve must NOT leave the raw input (e.g. an email TITLE)
+                    // echoed as contentKey. The agent captures @outputs.contentKey as the update target
+                    // (base_update_targetKey); a non-key value there passes the "!= \"\"" gate and then
+                    // 400s the Update's CMS GET with "INVALID_ID_FIELD: Provide a valid content key, ID,
+                    // or FQN." Blank it so found=false carries an empty key and Update never fires on a
+                    // bogus target.
+                    res.contentKey = '';
                     results.add(res); continue;
                 }
                 res.contentKey = key;  // echo the RESOLVED key so the update target is the real MC key
@@ -290,7 +297,12 @@ public with sharing class ReadDynamicEmailAction {
     // with a clear message; a 9Ps variantId isn't resolvable in Apex (ManagedContentVersion isn't an
     // Apex-queryable sObject on this org), but every page surface also exposes the 20Y... record Id, so
     // callers should pass that. One SOQL, no callout; "with sharing" limits it to records the user sees.
-    private static String resolveToContentKey(String raw) {
+    // PUBLIC so UpdateDynamicEmailAction (a separate class) can normalize its target the SAME way the
+    // read path does -- accept an MC content key OR a 20Y ManagedContent record Id, resolving the Id to
+    // the real content key before the Connect CMS GET. Defense-in-depth behind the Read echo fix: a
+    // record Id (or any non-MC shape) fed straight to the endpoint 400s with the opaque
+    // "INVALID_ID_FIELD: Provide a valid content key, ID, or FQN." Pure Apex SOQL, no callout.
+    public static String resolveToContentKey(String raw) {
         if (String.isBlank(raw)) { return ''; }
         String v = raw.trim();
         // Already a CMS content key.

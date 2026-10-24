@@ -65,11 +65,27 @@ public with sharing class UpdateDynamicEmailAction {
                 String accessToken = BuildDynamicEmailAction.sharedTokenSource().getAccessToken();
                 String dataSpace = String.isNotBlank(req.dataSpaceName) ? req.dataSpaceName : 'default';
 
+                // Normalize the target the SAME way Read does: accept an MC content key OR a 20Y
+                // ManagedContent record Id (resolve the Id to its key). Defense-in-depth: if a non-key
+                // value (e.g. an email TITLE the LLM passed) reaches here, fail with a CLEAR message
+                // naming the value instead of letting the CMS GET 400 with the opaque
+                // "INVALID_ID_FIELD: Provide a valid content key, ID, or FQN." (The primary fix is in
+                // Read, which no longer echoes an unresolved raw input as the update target.)
+                String resolvedKey = ReadDynamicEmailAction.resolveToContentKey(req.contentKey);
+                if (String.isBlank(resolvedKey)) {
+                    res.errorMessage = 'Could not resolve "' + (req.contentKey == null ? '' : req.contentKey)
+                        + '" to an existing email. Read the email first (Read Dynamic Email) so the update '
+                        + 'targets its real content key (MC...), or pass a ManagedContent record Id (20Y...). '
+                        + 'Nothing was changed.';
+                    results.add(res); continue;
+                }
+                res.contentKey = resolvedKey;
+
                 // 1. Fetch the existing content: body + variant record id.
                 HttpRequest getReq = new HttpRequest();
                 getReq.setMethod('GET');
                 getReq.setEndpoint(AuraPocTokenProvider.instanceUrl()
-                    + '/services/data/v66.0/connect/cms/contents/' + EncodingUtil.urlEncode(req.contentKey, 'UTF-8'));
+                    + '/services/data/v66.0/connect/cms/contents/' + EncodingUtil.urlEncode(resolvedKey, 'UTF-8'));
                 getReq.setHeader('Authorization', 'Bearer ' + accessToken);
                 getReq.setTimeout(30000);
                 HttpResponse getRes = new Http().send(getReq);

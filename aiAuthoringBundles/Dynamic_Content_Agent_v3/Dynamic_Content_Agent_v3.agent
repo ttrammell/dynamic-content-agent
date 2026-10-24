@@ -818,25 +818,39 @@ subagent plan:
               This is a hard rule: never present an unfiltered brand list once a workspace is pinned,
               even though the cached list holds every workspace's brands.
 
-              *** UNDERSTANDING GATE (Feature 1 -- a cheap read-back BEFORE spending planning/copy) ***
-              After you capture a NEW content request (note_email_request) and before you show the
-              full plan summary, read the request back in ONE short line and ask the user to confirm:
-              "Here's what I understood -- <brand, if any>; <the personalization intent, e.g. personalize
-              the body by industry: Healthcare, Technology, Finance>. Correct?" Offer these as plain
-              options on their own lines:
+              *** ORIENTATION GATE (a cheap read-back BEFORE spending planning/copy) ***
+              ONLY WHEN {!@variables.base_content_understandingOk} is False (never re-show it once the
+              user has confirmed it this plan -- re-showing a read-back the user already affirmed is the
+              double-read-back bug and is forbidden): after you capture a NEW or REVISED content request
+              (note_email_request) and before you show the full plan summary, read back what you
+              understood as an ORIENTATION -- intent PLUS the data it will use -- so the user catches a
+              wrong field/graph/workspace BEFORE the expensive plan. Show these lines, each on its own:
+                "Here's what I understood:
+                - Intent: <the personalization intent, e.g. swap the hero image by Title: CEO, Marketing Director, IT Manager, Sales Manager>
+                - Brand: <base_brand_requestedName, or 'no specific brand (org default)'>
+                - Workspace: <the CMS workspace it will build into, if resolved>
+                - Data graph: <base_data_resolvedGraphApiName, or 'auto-resolving'>
+                - Fields: <the data-graph field(s) the personalization will use>
+                Correct?"
                 - Yes, that's correct
                 - No, let me fix that
-              MANDATORY FIRE ON UNDERSTANDING CONFIRM: once you have shown that read-back, if the user's
+              FIELD GROUNDING (anti-drift -- the Industry / Engagement_Score failures): map the intent's
+              field(s) to the REAL graph fields in {!@variables.base_data_fieldsJson}. If a named field
+              is NOT in that catalog (e.g. "Industry" when the graph has none) or is the WRONG TYPE for
+              the ask (e.g. a text persona label like "Engaged Loyalist" on a numeric field like
+              Engagement_Score), SAY SO on the Fields line and suggest the closest real field (e.g. Title
+              / Country) -- do NOT proceed to plan on an invalid field. Only read back fields that exist
+              in base_data_fieldsJson; never invent one.
+              ALWAYS FIRE -- do NOT skip this even when the opening request is fully specific. A specific
+              request is PRE-FILLED into the read-back above (so it's one quick confirm, not a re-ask),
+              but it is never skipped: the orientation is the only place a wrong field/graph/workspace is
+              caught before a full plan is drafted.
+              MANDATORY FIRE ON ORIENTATION CONFIRM: once you have shown that read-back, if the user's
               next message affirms it (yes / correct / right / that's it), your VERY NEXT action MUST be
               to call {!@actions.confirm_understanding_tool} with understandingOk = true. Re-showing the
               read-back, or saying "great" WITHOUT calling it, is a FAILURE -- the gate never latches.
               After calling it, continue to draft/show the plan. If they say it's wrong, re-capture with
               note_email_request (which clears the gate) and read back again.
-              SKIP this gate -- go straight to planning -- ONLY when the user's opening message ALREADY
-              stated the specifics (what to personalize + by which field/values, or a clear one-shot);
-              a specific request should not be forced through a separate confirm turn. When skipping,
-              still set understandingOk (call confirm_understanding_tool with true) so the downstream
-              gate is satisfied.
 
               *** DRAFT-STATUS READOUT (Feature 1 -- make "what's missing" obvious) ***
               Whenever the user asks "show draft" / "what's left" / "status", or after you capture an
@@ -943,6 +957,13 @@ subagent plan:
               before a build ran, say the plan is ready for approval (or, if stalled, report the
               stall) -- never fabricate a success. base_build_success/contentKey/contentUrl are set
               ONLY by the build/update tool; if you did not just call it, they are not yours to report.
+              THIS INCLUDES FUTURE/PROGRESS TENSE: with base_build_attempted False, do NOT say "approved
+              and will now be built", "is being built", "building it now", "will be saved to your CMS
+              workspace", or any wording implying a build is happening or imminent. Approval is NOT a
+              build. If you recorded approval but did not call the build tool, you are at a STALL (the
+              deterministic guard sets base_error_stalled) -- report the stall wording, do not narrate
+              progress. The ONLY correct "it exists" statements come from the ALREADY BUILT block below,
+              which is gated on base_build_success.
 
               ALREADY BUILT: if {!@variables.base_build_attempted} is True, the email was
               already created this session -- do NOT re-plan, do NOT re-show the summary,
@@ -1038,10 +1059,20 @@ subagent plan:
               Keep this clarification even when the dialog wording changes -- the agent only
               ever creates/updates CMS content; it never sends email.
 
-              If the user asks for ANY change, (re-)plan it -- call
-              {!@actions.note_requested_brand} for a brand change and/or
-              {!@actions.note_email_request} for a content change -- then show the
-              summary again. This loop repeats as many times as they like.
+              *** REVISION = RE-CAPTURE FIRST (hard rule) *** If the user asks for ANY change to an
+              already-planned email -- add/remove/change a slot, make an area a dynamic image, change
+              the field/values, the copy, the brand, anything -- your VERY FIRST action MUST be to
+              re-capture it: call {!@actions.note_requested_brand} for a brand change AND/OR
+              {!@actions.note_email_request} with the FULL revised request (describing the WHOLE email
+              as it should now be, not just the delta). This is the ONLY thing that clears the old plan
+              and re-runs the pipeline (plan -> fill -> assemble -> validate) -- it does NOT happen on
+              its own. A change applies to a plan that is NOT stalled just as much as to one that is:
+              do NOT assume a clean prior plan means "no re-capture needed." FORBIDDEN on a change:
+              re-showing the orientation read-back INSTEAD of re-capturing, narrating a new summary from
+              the OLD plan, or saying the change is "applied/added/done" -- until note_email_request has
+              run, the change does not exist in the plan and the build tool will build the OLD plan (or
+              stay unavailable). After re-capturing, the next turn shows the orientation read-back (the
+              gate re-armed) and then the fresh summary. This loop repeats as many times as they like.
 
               When the user EXPLICITLY approves the summary (yes / approved / looks good /
               proceed / build it), do BOTH of these in the SAME turn, in order:
@@ -1711,4 +1742,19 @@ subagent plan:
         # a silent dead gate. A validated plan keeps its approval untouched.
         if @variables.base_content_planApproved == True and @variables.base_content_validated == False:
             set @variables.base_content_planApproved = False
+
+        # DETERMINISTIC GUARD -- APPROVED BUT NOT BUILT (anti-fabricated-success). Confirmed live
+        # (TTR0, 2026-10-23): after "approve" the LLM replied "approved and will now be built ... access
+        # it in your CMS workspace" but build_dynamic_email_tool NEVER ran (base_build_attempted False),
+        # and nothing was created. The anti-false-success rule is prose-only (reasoning ~939-945) and the
+        # scripted "Approving will BUILD and SAVE ..." summary line is shown BEFORE any build, so the LLM
+        # can free-write a future-tense success. This guard makes "approved with no build" a REAL stall
+        # the reasoning MUST report (see the base_error_stalled report path) instead of a fabrication.
+        # Fires only when the plan both validated AND was approved AND the tool did not run this turn --
+        # a real build sets base_build_attempted True (build tool) so it never trips post-build. Does not
+        # apply mid-approval-turn: approval + the tool call happen in the SAME turn, so base_build_attempted
+        # is True by the time after_reasoning runs on a genuine build.
+        if @variables.base_content_planApproved == True and @variables.base_content_validated == True and @variables.base_build_attempted == False:
+            set @variables.base_error_pipeline = "You approved the plan, but the build hasn't run yet -- I have NOT built or saved anything. Say \"build it\" to proceed, or tell me what to change."
+            set @variables.base_error_stalled = True
 

@@ -1356,14 +1356,25 @@ public with sharing class BuildDynamicEmailAction {
                                 + autoPoolSize + ' image(s) to swap between. Reduce the number of values, '
                                 + 'name a specific image per value, or add more stock/brand images.');
                         }
-                        // Combined pool: contentKey assets first, then off-CMS url assets. A url pick is
-                        // stamped as `url` (url-mode) and NOT added to the contentKey existence set.
-                        if (autoIdx < catalogKeys.size()) {
+                        // Combined pool. PREFER Contentful (url) images when the org has them: draw the
+                        // url pool FIRST, then CMS contentKey assets as fill. Rationale: when a Contentful
+                        // connection is configured, its heroes are the intended swap imagery (real,
+                        // on-brand, URL-based), whereas the CMS side is often generic stock -- the old
+                        // "CMS first" order made auto-assign pick stock even when 19 heroes were available
+                        // (observed live). When there are NO url assets this is identical to before (CMS
+                        // only). A url pick is stamped `url` (url-mode), NOT added to the contentKey set.
+                        Boolean preferUrls = !catalogUrls.isEmpty();
+                        if (preferUrls) {
+                            if (autoIdx < catalogUrls.size()) {
+                                img.put('url', catalogUrls[autoIdx]); img.remove('contentKey'); changed = true;
+                            } else {
+                                resolved = catalogKeys[autoIdx - catalogUrls.size()];
+                                img.put('contentKey', resolved); img.remove('url'); changed = true;
+                            }
+                        } else {
+                            // No Contentful urls -> original CMS-first behavior (CMS keys only here).
                             resolved = catalogKeys[autoIdx];
                             img.put('contentKey', resolved); img.remove('url'); changed = true;
-                        } else {
-                            String au = catalogUrls[autoIdx - catalogKeys.size()];
-                            img.put('url', au); img.remove('contentKey'); changed = true;
                         }
                         autoIdx++;
                     } else {
@@ -1537,6 +1548,17 @@ public with sharing class BuildDynamicEmailAction {
                 validateImageContentKeys(accessToken, imageKeysToValidate);
 
                 Map<String, Object> blockIds = new Map<String, Object>();
+                // BASE image block type per elementKey, so a swap variant matches the BASE it replaces.
+                // A base image renders as lightning/html (a literal <img>) when the element carries a url
+                // (off-CMS/Contentful), else as lightning/image (CMS contentKey). After Part A mixed CMS +
+                // Contentful in the swap pool, a base could be lightning/image (CMS) while a per-decision
+                // variant resolved to a Contentful url -- the old variant branch then emitted an html
+                // rawHtml block onto a lightning/image base and the PUT 400'd (additionalProperties:false,
+                // "You can't add the rawHtml property"). Threading the base's real type to the wire (via
+                // liveBlockDefByElementKey) forces each variant to the base's block type: html base -> html
+                // variant; lightning/image base -> url-mode lightning/image variant. See
+                // [[feedback_dc_agent_html_block_pp_swap_supported]].
+                Map<String, String> baseImageDefByKey = new Map<String, String>();
                 Map<String, Object> expressionsByKey = new Map<String, Object>();
                 Boolean bodyBranding = req.includeBranding == null ? true : req.includeBranding;
 
@@ -1584,6 +1606,12 @@ public with sharing class BuildDynamicEmailAction {
                     String blockId = newBlockId();
                     Map<String, Object> builtBlock = buildElementBlock(blockId, el);
                     blockIds.put(key, blockId);
+                    // Record the BASE type an image element rendered as, so its swap variants match it.
+                    // Same signal buildElementBlock used: a url -> lightning/html <img>; else lightning/image.
+                    if (elType == 'image') {
+                        baseImageDefByKey.put(key,
+                            String.isNotBlank(String.valueOf(el.get('url'))) ? 'lightning/html' : 'lightning/image');
+                    }
 
                     if (elType == 'image' || elType == 'button') {
                         if (!currentGroupChildren.isEmpty()) {
@@ -1796,6 +1824,13 @@ public with sharing class BuildDynamicEmailAction {
                 validateImageContentKeys(accessToken, variantImgKeys);
 
                 // --- Step 2: personalize, in the same call. Any failure here rolls back Step 1. ---
+                // Tell the wire each image slot's BASE block type (baseImageDefByKey) via the shared
+                // liveBlockDefByElementKey static, so a swap variant matches the base it replaces: an
+                // html <img> base -> html variant; a lightning/image (CMS) base -> url-mode
+                // lightning/image variant. This prevents the rawHtml-on-lightning/image 400 that occurred
+                // once CMS + Contentful images mixed in one swap. Restored in finally so it never leaks.
+                Map<String, String> prevLiveDef = liveBlockDefByElementKey;
+                liveBlockDefByElementKey = baseImageDefByKey;
                 try {
                     wirePersonalizations(ppSpecs, accessToken, managedContentId, fetchedContentBody, managedContentVariantId, blockIds, dataSpace, graphName, topo, res);
                 } catch (Exception wireEx) {
@@ -1805,6 +1840,8 @@ public with sharing class BuildDynamicEmailAction {
                     res.rolledBack = rolledBack;
                     res.errorMessage = 'Personalization failed' + (rolledBack ? ', created email was rolled back: ' : ' AND rollback delete also failed -- email may still exist: ')
                         + wireEx.getMessage();
+                } finally {
+                    liveBlockDefByElementKey = prevLiveDef;
                 }
             } catch (Exception e) {
                 if (managedContentVariantId != null) {
@@ -2105,17 +2142,18 @@ public with sharing class BuildDynamicEmailAction {
                         if (sp.get('preheader') != null) { variantBody.put('preheader', sp.get('preheader')); }
                     } else if ((textByDecision.get(rawDecisionName) instanceof Map<String, Object>)
                             && String.isNotBlank(String.valueOf(((Map<String, Object>) textByDecision.get(rawDecisionName)).get('url')))
-                            && (blockDefinition == 'lightning/html'
-                                || (allowHtmlImageVariants && blockDefinition == 'lightning/image'))) {
-                        // URL-based image swap variant -> emit a lightning/html <img> block, matching the
-                        // html base block the build path made for this URL image. Two paths reach here:
-                        //   - FRESH BUILD: allowHtmlImageVariants on + plan blockDefinition lightning/image.
-                        //   - UPDATE of an html-image slot: liveBlockDefByElementKey set blockDefinition to
-                        //     lightning/html, so the variant matches the existing html base (a url-mode
-                        //     lightning/image variant on an html base renders nothing). The flag is off on
-                        //     update; the lightning/html branch is what carries this case.
-                        // A url-image swap targeting a genuine lightning/image base block (the CMS url-mode
-                        // image path) still falls to the else below -> url-mode lightning/image variant.
+                            && blockDefinition == 'lightning/html') {
+                        // URL-based image swap variant -> emit a lightning/html <img> block. Gate STRICTLY
+                        // on the EFFECTIVE base type being lightning/html (set from the base image block:
+                        // build path -> baseImageDefByKey; update path -> liveBlockDefByElementKey). A url
+                        // variant is emitted as html ONLY when the BASE it replaces is itself an html <img>
+                        // block. If the base is a lightning/image (CMS contentKey) block, a url variant must
+                        // NOT be html -- that put a rawHtml property on a lightning/image and the PUT 400'd
+                        // (additionalProperties:false). Such a case falls to the else below, which emits a
+                        // url-mode lightning/image variant (variantAttributesFor handles a url value), so
+                        // base and variant are the SAME block type. The old condition also fired on
+                        // (allowHtmlImageVariants && blockDefinition=='lightning/image'), which is exactly
+                        // what produced the mismatch once CMS + Contentful images mixed in one swap.
                         // Proven live: PP swap on an html block wires via create-PP + encoded-rawHtml. See
                         // [[feedback_dc_agent_html_block_pp_swap_supported]].
                         Map<String, Object> img = (Map<String, Object>) textByDecision.get(rawDecisionName);

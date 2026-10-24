@@ -72,25 +72,39 @@ public with sharing class GetAssetCatalogAction {
     @TestVisible
     private static List<Object> discoverImages(String brandName, Boolean includeStock) {
         Map<String, Object> byKey = new Map<String, Object>();  // dedup on contentKey, insertion-ordered
-        // 0. Contentful heroes (only when a Contentful connection is configured in THIS org). These
-        //    carry a direct assetUrl (CDN) and NO contentKey -- Build emits them as url-mode image
-        //    blocks (no CMS publish needed). Highest priority so a brand's real hero wins the cap. Keyed
-        //    in byKey by a synthetic "url:<assetUrl>" so dedup still works alongside contentKey assets.
-        for (Object o : contentfulHeroes(brandName)) { addAsset(byKey, o); }
-        // 1. Brand assets (only if a brand was named) -- highest priority, kept ahead of the cap.
+        // Contentful heroes now come back brand-TAGGED (not brand-filtered), so split them: brand-matched
+        // heroes are highest-intent and rank first; the rest are available as fill AFTER the brand's CMS
+        // assets so a non-SF/NTO brand (e.g. Welo) still gets real Contentful swap images while its own
+        // CMS logo/header are never crowded out of the cap. See [[feedback_dc_agent_html_block_pp_swap_supported]].
+        List<Object> matchedHeroes = new List<Object>();
+        List<Object> otherHeroes = new List<Object>();
+        for (Object o : contentfulHeroes(brandName)) {
+            Map<String, Object> h = (Map<String, Object>) o;
+            if (h.get('brandMatch') == false) { otherHeroes.add(o); } else { matchedHeroes.add(o); }
+            h.remove('brandMatch');   // internal ranking hint only -- never serialized to the catalog
+        }
+        // Insertion order (= cap-truncation priority):
+        // 1. brand-MATCHED Contentful heroes -- the brand's own highest-intent hero(es).
+        for (Object o : matchedHeroes) { addAsset(byKey, o); }
+        // 2. Brand CMS assets (only if a brand was named) -- logo/header/brand images. MUST come before
+        //    the non-matched hero fill so they survive the cap (ResolveBranding needs these contentKeys).
         if (String.isNotBlank(brandName)) {
             for (Object o : FindBrandAssetsAction.searchAssets(brandName, MAX_CATALOG)) { addAsset(byKey, o); }
         }
-        // 2. Structural header/hero names -- finds the real swap images in orgs that don't use "Stock *".
+        // 3. Structural header/hero names -- finds the real swap images in orgs that don't use "Stock *".
         for (String term : STRUCTURAL_TERMS) {
             for (Object o : FindBrandAssetsAction.searchAssets(term, 8)) { addAsset(byKey, o); }
         }
-        // 3. Stock library -- the toolkit's "Stock *" upload convention (unchanged behavior for orgs
+        // 4. The REST of the Contentful heroes (not brand-matched) -- the "available regardless of brand"
+        //    fill, so image swaps can use Contentful even when the brand has no heroes of its own.
+        for (Object o : otherHeroes) { addAsset(byKey, o); }
+        // 5. Stock library -- the toolkit's "Stock *" upload convention (unchanged behavior for orgs
         //    that have them). Real sfdc_cms__image records, not install-time {{STOCK:id}} tokens.
         if (includeStock) {
             for (Object o : FindBrandAssetsAction.searchAssets('Stock ', MAX_CATALOG)) { addAsset(byKey, o); }
         }
-        // Cap in insertion order (contentful -> brand -> structural -> stock), stamping swapEligible.
+        // Cap in insertion order (matched heroes -> brand CMS -> structural -> other heroes -> stock),
+        // stamping swapEligible.
         List<Object> out = new List<Object>();
         for (Object o : byKey.values()) {
             if (out.size() >= MAX_CATALOG) { break; }
@@ -230,11 +244,17 @@ public with sharing class GetAssetCatalogAction {
                 Map<String, Object> entry = (Map<String, Object>) io;
                 Map<String, Object> f = (Map<String, Object>) entry.get('fields');
                 if (f == null) { continue; }
-                // Brand filter: when a brand is named, keep only its heroes; otherwise take all.
+                // Brand TAGGING (was a hard drop): keep EVERY hero, but mark whether it matches the
+                // named brand so discoverImages can rank brand-matched heroes first and offer the rest
+                // as fill. Dropping non-matching heroes used to gut the pool for any brand without
+                // Contentful heroes of its own (the space may carry only brand-salesforce / brand-nto),
+                // so a brand like "Welo" saw ~zero heroes and the swap fell back to CMS stock. A hero
+                // matches when no brand is named, the hero has no brandId, or the names substring-match
+                // either way. See [[feedback_dc_agent_html_block_pp_swap_supported]].
                 String entryBrand = f.get('brandId') == null ? '' : String.valueOf(f.get('brandId')).trim().toLowerCase();
                 String entryTitle = f.get('title') == null ? '' : String.valueOf(f.get('title'));
-                if (String.isNotBlank(wantBrand) && String.isNotBlank(entryBrand)
-                        && !entryBrand.contains(wantBrand) && !wantBrand.contains(entryBrand)) { continue; }
+                Boolean brandMatch = String.isBlank(wantBrand) || String.isBlank(entryBrand)
+                        || entryBrand.contains(wantBrand) || wantBrand.contains(entryBrand);
                 String au = contentfulImageUrl(f, assetUrlById);
                 if (String.isBlank(au)) { continue; }
                 Map<String, Object> sysMap = (Map<String, Object>) entry.get('sys');
@@ -251,7 +271,10 @@ public with sharing class GetAssetCatalogAction {
                     'name' => nm,
                     'urlName' => sysMap != null ? String.valueOf(sysMap.get('id')) : nm,
                     'assetUrl' => au,
-                    'source' => 'contentful'
+                    'source' => 'contentful',
+                    // Internal ranking hint for discoverImages (stripped before the catalog is
+                    // serialized out, see below) -- brand-matched heroes rank ahead of the rest.
+                    'brandMatch' => brandMatch
                 };
                 String theme = f.get('theme') == null ? '' : String.valueOf(f.get('theme')).trim();
                 String audienceFit = f.get('loyaltyTierFit') == null ? '' : String.valueOf(f.get('loyaltyTierFit')).trim();

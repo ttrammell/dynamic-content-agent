@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <AiAuthoringBundle xmlns="http://soap.sforce.com/2006/04/metadata">
   <bundleType>AGENT</bundleType>
-  <versionDescription>Builds and updates personalized Salesforce CMS emails from a data graph: add/retarget dynamic content, multilingual, brand/asset resolution, image-catalog discovery, workspace-scoped brands, email-capable workspace auto-resolution, direct-URL images.</versionDescription>
-  <versionTag>3.2</versionTag>
+  <versionDescription>Builds and updates personalized Salesforce CMS emails from a data graph: dynamic content, multilingual, brand resolution, Contentful + CMS images. 3.3 adds an early orientation read-back (field validated vs the graph) and guards false build claims.</versionDescription>
+  <versionTag>3.3</versionTag>
 </AiAuthoringBundle>
